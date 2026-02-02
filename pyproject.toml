@@ -1,0 +1,58 @@
+[project]
+name = "llm-with-jax-practice"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "absl-py>=2.4.0",
+    "chex>=0.1.91",
+    "datasets>=4.5.0",
+    "einops>=0.8.2",
+    "flax>=0.12.3",
+    "grain>=0.2.15",
+    "jax>=0.9.0",
+    "jupyter>=1.1.1",
+    "matplotlib>=3.10.8",
+    "notebook>=7.5.3",
+    "numpy>=2.3.5",
+    "optax>=0.2.6",
+    "orbax>=0.1.9",
+    "pandas>=3.0.0",
+    "pytest>=9.0.2",
+    "scikit-learn>=1.8.0",
+    "scipy>=1.17.0",
+    "seaborn>=0.13.2",
+    "tqdm>=4.67.2",
+    "wandb>=0.24.1",
+]
+
+[build-system]
+requires = ["uv_build>=0.9.28,<0.10.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "llm_with_jax_practice"
+module-root = ""
+
+[tool.uv]
+package = true
+python-preference = "managed"
+
+[tool.pytest.ini_options]
+log_cli = true
+log_cli_level = "WARNING"
+addopts = "-s"
+
+[tool.ruff]
+line-length = 80
+
+[tool.ruff.lint.extend-per-file-ignores]
+# Also ignore `E402` in all `__init__.py` files.
+"__init__.py" = ["E402", "F401", "F403", "E501"]
+
+[tool.ruff.lint]
+extend-select = ["UP"]
+ignore = [
+    "F722"
+]
