@@ -135,20 +135,14 @@ class RoPE(nnx.Module):
         d_k: int,
         max_seq_len: int,
     ):
-        theta_tensor = einops.einsum(
-            jnp.arange(max_seq_len),
-            1.0 / theta ** (2 * jnp.arange(d_k // 2) / d_k),
-            "seq_len, half_d_k -> seq_len half_d_k",
+        theta_tensor = jnp.arange(max_seq_len)[:, None] / (
+            theta ** (2 * jnp.arange(d_k // 2) / d_k)[None, :]
         )
-        cosine_matrix = einops.einsum(
-            jnp.cos(theta_tensor),
-            jnp.array([[1.0, 0], [0, 1.0]]),
-            "seq_len half_d_k, r_out r_in -> seq_len half_d_k r_out r_in",
+        cosine_matrix = jnp.cos(theta_tensor)[:, :, None, None] * (
+            jnp.array([[1.0, 0], [0, 1.0]])[None, None, :, :]
         )
-        sine_matrix = einops.einsum(
-            jnp.sin(theta_tensor),
-            jnp.array([[0, -1.0], [1.0, 0]]),
-            "seq_len half_d_k, r_out r_in -> seq_len half_d_k r_out r_in",
+        sine_matrix = jnp.sin(theta_tensor)[:, :, None, None] * (
+            jnp.array([[0, -1.0], [1.0, 0]])[None, None, :, :]
         )
         # https://gemini.google.com/app/2aad378109c833fe
         self.rope_matrix = nnx.Variable(cosine_matrix + sine_matrix)
