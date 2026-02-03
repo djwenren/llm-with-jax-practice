@@ -1,8 +1,8 @@
 """Tests for layers."""
 
+import einops
 import jax
 import jax.numpy as jnp
-import numpy as np
 
 from flax import nnx
 
@@ -63,4 +63,53 @@ def test_rope(numpy_snapshot, in_embeddings, d_model, theta, n_queries, pos_ids)
     """Test RoPE layer."""
     rope = layers.RoPE(theta=theta, d_k=d_model, max_seq_len=n_queries)
     y = rope(jnp.array(in_embeddings), jnp.array(pos_ids))
+    numpy_snapshot.assert_match(y)
+
+
+def test_multihead_self_attention(
+    numpy_snapshot, in_embeddings, d_model, n_heads, ts_state_dict
+):
+    """Test Multi-head self-attention layer."""
+    d, _ = ts_state_dict
+    q_proj_weight, k_proj_weight, v_proj_weight, o_proj_weight = [
+        d[f"layers.0.attn.{k}_proj.weight"] for k in ["q", "k", "v", "output"]
+    ]
+    multi_head_self_attention = layers.MultiHeadSelfAttention(
+        d_model=d_model, num_heads=n_heads, rngs=nnx.Rngs(jax.random.key(42))
+    )
+    multi_head_self_attention.combined_in_projection.weight = jnp.concatenate(
+        [jnp.array(q_proj_weight), jnp.array(k_proj_weight), jnp.array(v_proj_weight)],
+        axis=0,
+    )
+    multi_head_self_attention.out_projection.weight = jnp.array(o_proj_weight)
+    y = multi_head_self_attention(jnp.array(in_embeddings))
+    numpy_snapshot.assert_match(y)
+
+
+def test_multihead_self_attention_with_rope(
+    numpy_snapshot,
+    in_embeddings,
+    d_model,
+    n_heads,
+    ts_state_dict,
+    n_keys,
+    theta,
+    pos_ids,
+):
+    """Test Multi-head self-attention layer with RoPE."""
+    d, _ = ts_state_dict
+    q_proj_weight, k_proj_weight, v_proj_weight, o_proj_weight = [
+        d[f"layers.0.attn.{k}_proj.weight"] for k in ["q", "k", "v", "output"]
+    ]
+    pos_ids = einops.rearrange(jnp.array(pos_ids), "seq -> 1 seq")
+    rope = layers.RoPE(theta=theta, d_k=d_model // n_heads, max_seq_len=n_keys)
+    multi_head_self_attention = layers.MultiHeadSelfAttention(
+        d_model=d_model, num_heads=n_heads, rngs=nnx.Rngs(jax.random.key(42)), rope=rope
+    )
+    multi_head_self_attention.combined_in_projection.weight = jnp.concatenate(
+        [jnp.array(q_proj_weight), jnp.array(k_proj_weight), jnp.array(v_proj_weight)],
+        axis=0,
+    )
+    multi_head_self_attention.out_projection.weight = jnp.array(o_proj_weight)
+    y = multi_head_self_attention(jnp.array(in_embeddings), token_positions=pos_ids)
     numpy_snapshot.assert_match(y)

@@ -170,3 +170,72 @@ class RoPE(nnx.Module):
             output,
             "... seq_len half_d_k r_out -> ... seq_len (half_d_k r_out)",
         )
+
+
+class MultiHeadSelfAttention(nnx.Module):
+    """Multi-head self-attention layer."""
+
+    def __init__(
+        self,
+        d_model: int,
+        num_heads: int,
+        rngs: nnx.Rngs,
+        rope: RoPE | None = None,
+        dtype: jnp.dtype = jnp.float32,
+    ):
+        assert (
+            d_model % num_heads
+        ) == 0, f"d_model {d_model} must be divisible by num_heads {num_heads}."
+        d_head = d_model // num_heads
+        self.num_heads = num_heads
+        self.d_head = d_head
+        self.rope = rope
+        self.combined_in_projection = Linear(
+            in_features=d_model,
+            out_features=3 * d_model,
+            dtype=dtype,
+            rngs=rngs,
+        )
+        self.out_projection = Linear(
+            in_features=d_model,
+            out_features=d_model,
+            dtype=dtype,
+            rngs=rngs,
+        )
+
+    def __call__(
+        self,
+        in_features: Float[jnp.ndarray, "... seq_len d_model"],
+        token_positions: Int[jnp.ndarray, "... seq_len"] | None = None,
+    ) -> Float[jnp.ndarray, "... seq_len d_model"]:
+        combined_in_projection = self.combined_in_projection(in_features)
+        query, key, value = jnp.split(combined_in_projection, 3, axis=-1)
+        query = einops.rearrange(
+            query,
+            "... seq_len (num_heads d_head) -> ... num_heads seq_len d_head",
+            num_heads=self.num_heads,
+        )
+        key = einops.rearrange(
+            key,
+            "... seq_len (num_heads d_head) -> ... num_heads seq_len d_head",
+            num_heads=self.num_heads,
+        )
+        value = einops.rearrange(
+            value,
+            "... seq_len (num_heads d_head) -> ... num_heads seq_len d_head",
+            num_heads=self.num_heads,
+        )
+        if self.rope is not None and token_positions is not None:
+            query = self.rope(query, token_positions)
+            key = self.rope(key, token_positions)
+        seq_len = query.shape[-2]
+        mask = jnp.tril(jnp.ones((seq_len, seq_len), dtype=jnp.bool))
+        scaled_dot_product_attention_result = functions.scaled_dot_product_attention(
+            q=query, k=key, v=value, mask=mask
+        )
+        return self.out_projection(
+            einops.rearrange(
+                scaled_dot_product_attention_result,
+                "... num_heads seq_len d_head -> ... seq_len (num_heads d_head)",
+            )
+        )
