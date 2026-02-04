@@ -113,3 +113,56 @@ def test_multihead_self_attention_with_rope(
     multi_head_self_attention.out_projection.weight = jnp.array(o_proj_weight)
     y = multi_head_self_attention(jnp.array(in_embeddings), token_positions=pos_ids)
     numpy_snapshot.assert_match(y)
+
+
+def test_transformer_block(
+    numpy_snapshot, ts_state_dict, in_embeddings, d_model, n_heads, d_ff, n_keys, theta
+):
+    """Test Transformer block."""
+    block_weights = {
+        k.replace("layers.0.", ""): v
+        for k, v in ts_state_dict[0].items()
+        if "layers.0." in k
+    }
+    rope = layers.RoPE(theta=theta, d_k=d_model // n_heads, max_seq_len=n_keys)
+    transformer_block = layers.TransformerBlock(
+        d_model=d_model,
+        num_heads=n_heads,
+        d_ff=d_ff,
+        rngs=nnx.Rngs(jax.random.key(42)),
+        rope=rope,
+    )
+    transformer_block.rms_norm_pre_attn.weight = nnx.Param(
+        jnp.array(block_weights["ln1.weight"])
+    )
+    transformer_block.attn.combined_in_projection.weight = nnx.Param(
+        jnp.concatenate(
+            [
+                jnp.array(block_weights["attn.q_proj.weight"]),
+                jnp.array(block_weights["attn.k_proj.weight"]),
+                jnp.array(block_weights["attn.v_proj.weight"]),
+            ],
+            axis=0,
+        )
+    )
+    transformer_block.attn.out_projection.weight = nnx.Param(
+        jnp.array(block_weights["attn.output_proj.weight"])
+    )
+
+    transformer_block.rms_norm_pre_ff.weight = nnx.Param(
+        jnp.array(block_weights["ln2.weight"])
+    )
+    transformer_block.ffn.in_project_layer_1.weight = nnx.Param(
+        jnp.array(block_weights["ffn.w1.weight"])
+    )
+    transformer_block.ffn.in_project_layer_3.weight = nnx.Param(
+        jnp.array(block_weights["ffn.w3.weight"])
+    )
+    transformer_block.ffn.out_project_layer_2.weight = nnx.Param(
+        jnp.array(block_weights["ffn.w2.weight"])
+    )
+    y = transformer_block(
+        in_features=jnp.array(in_embeddings),
+        token_positions=jnp.arange(in_embeddings.shape[-2]),
+    )
+    numpy_snapshot.assert_match(y)

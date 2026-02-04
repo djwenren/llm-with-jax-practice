@@ -3,6 +3,7 @@
 import einops
 import jax
 import jax.numpy as jnp
+from jaxlib.mlir.dialects.mhlo import rng
 import numpy as np
 
 from flax import nnx
@@ -239,3 +240,37 @@ class MultiHeadSelfAttention(nnx.Module):
                 "... num_heads seq_len d_head -> ... seq_len (num_heads d_head)",
             )
         )
+
+
+class TransformerBlock(nnx.Module):
+    """Transformer block."""
+
+    def __init__(
+        self,
+        d_model: int,
+        num_heads: int,
+        d_ff: int,
+        rngs: nnx.Rngs,
+        rope: RoPE | None = None,
+        dtype: jnp.dtype = jnp.float32,
+        *,
+        eps: float = 1e-5,
+    ):
+        self.rms_norm_pre_attn = RMSNorm(d_model=d_model, eps=eps, dtype=dtype)
+        self.attn = MultiHeadSelfAttention(
+            d_model=d_model, num_heads=num_heads, rngs=rngs, rope=rope, dtype=dtype
+        )
+        self.rms_norm_pre_ff = RMSNorm(d_model=d_model, eps=eps, dtype=dtype)
+        self.ffn = SwiGLU(d_model=d_model, d_ff=d_ff, rngs=rngs, dtype=dtype)
+
+    def __call__(
+        self,
+        in_features: Float[jnp.ndarray, "... seq_len d_model"],
+        token_positions: Int[jnp.ndarray, "... seq_len"],
+    ) -> Float[jnp.ndarray, "... seq_len d_model"]:
+        activation = self.rms_norm_pre_attn(in_features)
+        activation = self.attn(in_features=activation, token_positions=token_positions)
+        post_attn_block_activation = in_features + activation
+        activation = self.rms_norm_pre_ff(post_attn_block_activation)
+        activation = self.ffn(activation)
+        return post_attn_block_activation + activation
