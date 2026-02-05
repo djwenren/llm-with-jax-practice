@@ -3,10 +3,10 @@
 import einops
 import jax
 import jax.numpy as jnp
-from jaxlib.mlir.dialects.mhlo import rng
 import numpy as np
 
 from flax import nnx
+from jax import Array
 from jaxtyping import Float
 from jaxtyping import Int
 
@@ -34,9 +34,7 @@ class Linear(nnx.Module):
             * std
         )
 
-    def __call__(
-        self, x: Float[jnp.ndarray, "... d_in"]
-    ) -> Float[jnp.ndarray, "... d_out"]:
+    def __call__(self, x: Float[Array, "... d_in"]) -> Float[Array, "... d_out"]:
         return einops.einsum(x, self.weight, "... d_in, d_out d_in -> ... d_out")
 
 
@@ -60,8 +58,8 @@ class Embedding(nnx.Module):
         )
 
     def __call__(
-        self, token_ids: Int[jnp.ndarray, "..."]
-    ) -> Float[jnp.ndarray, "... embedding_dim"]:
+        self, token_ids: Int[Array, "..."]
+    ) -> Float[Array, "... embedding_dim"]:
         return self.weight[token_ids]
 
 
@@ -77,9 +75,7 @@ class RMSNorm(nnx.Module):
         self.eps = eps
         self.weight = nnx.Param(jnp.ones((d_model,), dtype=dtype))
 
-    def __call__(
-        self, x: Float[jnp.ndarray, "... d_model"]
-    ) -> Float[jnp.ndarray, "... d_model"]:
+    def __call__(self, x: Float[Array, "... d_model"]) -> Float[Array, "... d_model"]:
         in_dtype = x.dtype
         x = x.astype(jnp.float32)
         result = (
@@ -119,9 +115,7 @@ class SwiGLU(nnx.Module):
             dtype=dtype,
         )
 
-    def __call__(
-        self, x: Float[jnp.ndarray, "... d_model"]
-    ) -> Float[jnp.ndarray, "... d_model"]:
+    def __call__(self, x: Float[Array, "... d_model"]) -> Float[Array, "... d_model"]:
         out_1 = self.in_project_layer_1(x)
         out_3 = self.in_project_layer_3(x)
         return self.out_project_layer_2(functions.silu(out_1) * out_3)
@@ -150,10 +144,10 @@ class RoPE(nnx.Module):
 
     def __call__(
         self,
-        x: Float[jnp.ndarray, "... seq_len d_k"],
-        token_positions: Int[jnp.ndarray, "... seq_len"],
-    ) -> Float[jnp.ndarray, "... seq_len d_k"]:
-        position_embeddings: Float[jnp.ndarray, "... seq_len half_d_k r_out r_in"] = (
+        x: Float[Array, "... seq_len d_k"],
+        token_positions: Int[Array, "... seq_len"],
+    ) -> Float[Array, "... seq_len d_k"]:
+        position_embeddings: Float[Array, "... seq_len half_d_k r_out r_in"] = (
             self.rope_matrix[token_positions]
         )
         x_rearranged = einops.rearrange(
@@ -206,9 +200,9 @@ class MultiHeadSelfAttention(nnx.Module):
 
     def __call__(
         self,
-        in_features: Float[jnp.ndarray, "... seq_len d_model"],
-        token_positions: Int[jnp.ndarray, "... seq_len"] | None = None,
-    ) -> Float[jnp.ndarray, "... seq_len d_model"]:
+        in_features: Float[Array, "... seq_len d_model"],
+        token_positions: Int[Array, "... seq_len"] | None = None,
+    ) -> Float[Array, "... seq_len d_model"]:
         combined_in_projection = self.combined_in_projection(in_features)
         query, key, value = jnp.split(combined_in_projection, 3, axis=-1)
         query = einops.rearrange(
@@ -265,9 +259,9 @@ class TransformerBlock(nnx.Module):
 
     def __call__(
         self,
-        in_features: Float[jnp.ndarray, "... seq_len d_model"],
-        token_positions: Int[jnp.ndarray, "... seq_len"],
-    ) -> Float[jnp.ndarray, "... seq_len d_model"]:
+        in_features: Float[Array, "... seq_len d_model"],
+        token_positions: Int[Array, "... seq_len"],
+    ) -> Float[Array, "... seq_len d_model"]:
         activation = self.rms_norm_pre_attn(in_features)
         activation = self.attn(in_features=activation, token_positions=token_positions)
         post_attn_block_activation = in_features + activation
