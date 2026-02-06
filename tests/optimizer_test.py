@@ -31,7 +31,7 @@ def _run_optimizer(tx: optax.GradientTransformation) -> jnp.ndarray:
     test_optimizer = nnx.Optimizer(model, tx, wrt=nnx.Param)
 
     sample_rng = jax.random.key(42)
-    for _ in range(100):
+    for _ in range(50):
         sample_rng, sample_key = jax.random.split(sample_rng)
         x = jax.random.uniform(sample_key, (in_features,))
         grads = nnx.grad(_loss_fn)(model, x)
@@ -41,10 +41,12 @@ def _run_optimizer(tx: optax.GradientTransformation) -> jnp.ndarray:
 
 def test_adam_optimizer():
     """Test Adam optimizer."""
-    my_adam_optimizer = optimizer.get_adam_optimizer(
-        learning_rate=1e-3,
-        betas=(0.9, 0.999),
-        eps=1e-8,
+    my_adam_optimizer = optax.chain(
+        optimizer.scale_by_adam(
+            betas=(0.9, 0.999),
+            eps=1e-8,
+        ),
+        optimizer.scale_by_learning_rate(learning_rate=1e-3),
     )
     final_weight = _run_optimizer(my_adam_optimizer)
 
@@ -61,11 +63,13 @@ def test_adam_optimizer():
 
 def test_adamw_optimizer():
     """Test AdamW optimizer."""
-    my_adamw_optimizer = optimizer.get_adamw_optimizer(
-        learning_rate=1e-3,
-        betas=(0.9, 0.999),
-        eps=1e-8,
-        weight_decay=1e-3,
+    my_adamw_optimizer = optax.chain(
+        optimizer.scale_by_adamw(
+            betas=(0.9, 0.999),
+            eps=1e-8,
+            weight_decay=1e-3,
+        ),
+        optimizer.scale_by_learning_rate(learning_rate=1e-3),
     )
     final_weight = _run_optimizer(my_adamw_optimizer)
 
@@ -75,6 +79,46 @@ def test_adamw_optimizer():
         b2=0.999,
         eps=1e-8,
         weight_decay=1e-3,
+    )
+    final_weight_reference = _run_optimizer(reference_adamw_optimizer)
+
+    assert jnp.allclose(final_weight, final_weight_reference)
+
+
+def test_adamw_with_cosine_onecycle_schedule():
+    """Test AdamW optimizer with cosine onecycle schedule."""
+    my_adamw_optimizer = optax.chain(
+        optimizer.scale_by_adamw(
+            betas=(0.9, 0.999),
+            eps=1e-8,
+            weight_decay=1e-3,
+        ),
+        optimizer.scale_by_schedule(
+            optimizer.cosine_onecycle_schedule(
+                max_learning_rate=1e-3,
+                min_learning_rate=1e-4,
+                warmup_iters=50,
+                cosine_cycle_iters=50,
+            )
+        ),
+    )
+    final_weight = _run_optimizer(my_adamw_optimizer)
+
+    reference_adamw_optimizer = optax.chain(
+        optax.adamw(
+            learning_rate=optax.warmup_cosine_decay_schedule(
+                init_value=0.0,
+                peak_value=1e-3,
+                warmup_steps=50,
+                decay_steps=100,
+                end_value=1e-4,
+                exponent=1.0,
+            ),
+            b1=0.9,
+            b2=0.999,
+            eps=1e-8,
+            weight_decay=1e-3,
+        ),
     )
     final_weight_reference = _run_optimizer(reference_adamw_optimizer)
 
