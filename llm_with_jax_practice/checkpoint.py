@@ -65,6 +65,11 @@ class CheckpointManager:
             ),
         )
         restored_model = nnx.merge(graph_def, restored_args.model_state)
+        # We can't use the same `nnx.merge` call to restore the optimizer becasue the abstract
+        # optimizer constructed above is linked to the abstract model's state (parameters). The
+        # returned optimizer should be linked to the restored model's state (parameters), so we
+        # need to construct a new optimizer.
+        # TODO(djwenren): what is the implication on sharding and memory footprint?
         restored_optimizer = nnx.Optimizer(restored_model, tx, wrt=nnx.Param)
         nnx.update(restored_optimizer, restored_args.optimizer_state)
         return restored_model, restored_optimizer, restored_args.metadata
