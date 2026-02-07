@@ -7,6 +7,7 @@ import numpy as np
 
 from jaxtyping import Bool
 from jaxtyping import Float
+from jaxtyping import Int
 
 
 def silu(x: Float[jnp.ndarray, "..."]) -> Float[jnp.ndarray, "..."]:
@@ -50,4 +51,18 @@ def scaled_dot_product_attention(
         softmax(scaled_dot_product, axis=-1),
         v,
         "... queries_len keys_len, ... keys_len d_v -> ... queries_len d_v",
+    )
+
+
+def cross_entropy_loss(
+    logits: Float[jnp.ndarray, "... vocab_size"],
+    target_seq: Int[jnp.ndarray, "..."],
+) -> Float[jnp.ndarray, ""]:
+    """Cross-entropy loss."""
+    logits_shifted: Float[jnp.ndarray, "... vocab_size"] = logits - logits.max(
+        axis=-1, keepdims=True
+    )
+    return jnp.mean(
+        -jnp.take_along_axis(logits_shifted, target_seq[..., None], axis=-1).squeeze()
+        + jnp.log(jnp.sum(jnp.exp(logits_shifted), axis=-1))
     )

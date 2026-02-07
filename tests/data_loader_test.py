@@ -60,11 +60,13 @@ def test_get_dataset():
     for starting_index, count in starting_indices.items():
         if count < occurrences_lower_bound:
             raise ValueError(
-                f"Starting index {starting_index} occurs {count} times, but expected at least {occurrences_lower_bound}"
+                f"Starting index {starting_index} occurs {count} times, but expected at least "
+                f"{occurrences_lower_bound}"
             )
         if count > occurrences_upper_bound:
             raise ValueError(
-                f"Starting index {starting_index} occurs {count} times, but expected at most {occurrences_upper_bound}"
+                f"Starting index {starting_index} occurs {count} times, but expected at most "
+                f"{occurrences_upper_bound}"
             )
 
 
