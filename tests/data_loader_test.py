@@ -4,6 +4,7 @@ import math
 from collections import Counter
 
 import numpy as np
+import jax
 
 from llm_with_jax_practice import data_loader
 
@@ -65,3 +66,66 @@ def test_get_dataset():
             raise ValueError(
                 f"Starting index {starting_index} occurs {count} times, but expected at most {occurrences_upper_bound}"
             )
+
+
+def test_same_shuffle_every_epoch_without_using_repeat():
+    """Test that the shuffle is the same every epoch."""
+    dataset_size = 10
+    test_numpy_data = np.arange(dataset_size)
+    batch_size = 2
+    context_length = 4
+    seed = 42
+
+    dataset = data_loader.get_dataset(
+        np_data=test_numpy_data,
+        context_length=context_length,
+        batch_size=batch_size,
+        shuffle=True,
+        seed=seed,
+    )
+
+    first_epoch_data = []
+    second_epoch_data = []
+    for x, y in dataset:
+        assert x.shape == (batch_size, context_length)
+        assert y.shape == (batch_size, context_length)
+        np.testing.assert_allclose(x + 1, y)
+        first_epoch_data.append((x, y))
+    for x, y in dataset:
+        assert x.shape == (batch_size, context_length)
+        assert y.shape == (batch_size, context_length)
+        np.testing.assert_allclose(x + 1, y)
+        second_epoch_data.append((x, y))
+    jax.tree.map(lambda x, y: x == y, first_epoch_data, second_epoch_data)
+
+
+def test_different_shuffle_every_epoch_with_using_repeat():
+    """Test that the shuffle is different every epoch when using repeat."""
+    dataset_size = 10
+    test_numpy_data = np.arange(dataset_size)
+    batch_size = 2
+    context_length = 4
+    seed = 42
+
+    dataset = data_loader.get_dataset(
+        np_data=test_numpy_data,
+        context_length=context_length,
+        batch_size=batch_size,
+        shuffle=True,
+        seed=seed,
+        use_repeat=True,
+        num_repeats=2,
+    )
+
+    both_epoch_data = []
+    for x, y in dataset:
+        assert x.shape == (batch_size, context_length)
+        assert y.shape == (batch_size, context_length)
+        np.testing.assert_allclose(x + 1, y)
+        both_epoch_data.append((x, y))
+    num_batechs_per_epoch = len(both_epoch_data) // 2
+    jax.tree.map(
+        lambda x, y: x != y,
+        both_epoch_data[:num_batechs_per_epoch],
+        both_epoch_data[num_batechs_per_epoch:],
+    )
