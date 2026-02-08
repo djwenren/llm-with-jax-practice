@@ -81,7 +81,8 @@ def train_loop(
                 {
                     "train/loss": loss,
                     "train/total_gradient_l2_norm": total_gradient_l2_norm,
-                }
+                },
+                step=step,
             )
         if (
             validation_every_n_steps
@@ -119,6 +120,7 @@ def run_validation(
         {
             "validation/loss": loss,
             "validation/perplexity": perplexity,
-        }
+        },
+        step=step,
     )
     logging.info(f"Step {step}: Validation loss: {loss}, perplexity: {perplexity}")
