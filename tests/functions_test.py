@@ -27,6 +27,4 @@ def test_cross_entropy_loss():
     expected_loss = jnp.mean(
         jax.vmap(jax.vmap(_ref_cross_entropy_loss))(logits, target_seq)
     )
-    print(f"{loss=}")
-    print(f"{expected_loss=}")
     assert jnp.allclose(loss, expected_loss)

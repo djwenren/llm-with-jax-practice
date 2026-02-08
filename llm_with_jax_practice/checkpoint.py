@@ -1,8 +1,10 @@
 """Checkpoint for Transformer language model."""
 
-import pathlib
+import dataclasses
+import os
 
 from typing import Any
+from typing import Sequence
 
 import optax
 import orbax.checkpoint as ocp
@@ -10,15 +12,21 @@ import orbax.checkpoint as ocp
 from flax import nnx
 from jaxtyping import PyTree
 
+from llm_with_jax_practice import train_config
+from llm_with_jax_practice import transformer
+
 
 class CheckpointManager:
     """Checkpoint manager for Transformer language model."""
 
     def __init__(
         self,
-        checkpoint_dir: pathlib.Path,
+        checkpoint_dir: os.PathLike,
         max_to_keep: int = 3,
         save_interval_steps: int = 2,
+        *,
+        train_config: train_config.TrainConfig | None = None,
+        model_config: transformer.TransformerConfig | None = None,
     ):
         self._ocp_checkpoint_manager_options = ocp.CheckpointManagerOptions(
             max_to_keep=max_to_keep,
@@ -28,6 +36,14 @@ class CheckpointManager:
             checkpoint_dir,
             options=self._ocp_checkpoint_manager_options,
             item_names=("model_state", "optimizer_state", "metadata"),
+            metadata={
+                "train_config": (
+                    None if train_config is None else dataclasses.asdict(train_config)
+                ),
+                "model_config": (
+                    None if model_config is None else dataclasses.asdict(model_config)
+                ),
+            },
         )
 
     def save(
@@ -73,3 +89,41 @@ class CheckpointManager:
         restored_optimizer = nnx.Optimizer(restored_model, tx, wrt=nnx.Param)
         nnx.update(restored_optimizer, restored_args.optimizer_state)
         return restored_model, restored_optimizer, restored_args.metadata
+
+    def all_steps(self) -> Sequence[int]:
+        """Returns all steps in the checkpoint."""
+        return self._ocp_checkpoint_manager.all_steps()
+
+    def latest_step(self) -> int | None:
+        """Returns the latest step in the checkpoint."""
+        return self._ocp_checkpoint_manager.latest_step()
+
+    def wait_until_finished(self) -> None:
+        """Blocks until the checkpoint is finished."""
+        self._ocp_checkpoint_manager.wait_until_finished()
+
+    def close(self) -> None:
+        """Closes the checkpoint manager."""
+        self._ocp_checkpoint_manager.close()
+
+    def metadata(self, step: int | None = None) -> Any:
+        """Returns the metadata for the checkpoint."""
+        return self._ocp_checkpoint_manager.metadata(step=step)
+
+    def train_config(self) -> train_config.TrainConfig | None:
+        """Returns the configuration for the checkpoint."""
+        train_config_dict = self._ocp_checkpoint_manager.metadata().custom_metadata[
+            "train_config"
+        ]
+        if train_config_dict is None:
+            return None
+        return train_config.TrainConfig(**train_config_dict)
+
+    def model_config(self) -> transformer.TransformerConfig | None:
+        """Returns the configuration for the checkpoint."""
+        model_config_dict = self._ocp_checkpoint_manager.metadata().custom_metadata[
+            "model_config"
+        ]
+        if model_config_dict is None:
+            return None
+        return transformer.TransformerConfig(**model_config_dict)

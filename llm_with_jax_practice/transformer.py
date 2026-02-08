@@ -4,12 +4,24 @@ import dataclasses
 import math
 
 import jax.numpy as jnp
+
+from absl import flags
 from jaxtyping import Float
 from jaxtyping import Int
-
 from flax import nnx
 
 from llm_with_jax_practice import layers as L
+
+_vocab_size = flags.DEFINE_integer("vocab_size", 1000, "Vocabulary size.")
+_context_length = flags.DEFINE_integer("context_length", 16, "Context length.")
+_num_layers = flags.DEFINE_integer("num_layers", 2, "Number of layers.")
+_num_heads = flags.DEFINE_integer("num_heads", 4, "Number of heads.")
+_rope_theta = flags.DEFINE_float("rope_theta", 10000, "RoPE theta.")
+_d_model = flags.DEFINE_integer("d_model", 128, "Model dimension.")
+_d_ff_to_d_model = flags.DEFINE_float(
+    "d_ff_to_d_model", None, "FF dimension to model dimension ratio."
+)
+_d_ff = flags.DEFINE_integer("d_ff", None, "FF dimension.")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -26,6 +38,20 @@ class TransformerConfig:
     d_model: int
     d_ff_to_d_model: float | None = None
     d_ff: int | None = None
+
+
+def get_transformer_config() -> TransformerConfig:
+    """Gets transformer configuration."""
+    return TransformerConfig(
+        vocab_size=_vocab_size.value,
+        context_length=_context_length.value,
+        num_layers=_num_layers.value,
+        num_heads=_num_heads.value,
+        rope_theta=_rope_theta.value,
+        d_model=_d_model.value,
+        d_ff_to_d_model=_d_ff_to_d_model.value,
+        d_ff=_d_ff.value,
+    )
 
 
 class TransformerLm(nnx.Module):
