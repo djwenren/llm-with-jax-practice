@@ -24,7 +24,9 @@ class TestLayers:
         )
         linear.weight = jnp.array(w1_weight)
 
-        call = nnx.jit(lambda model, x: model(x)) if use_jit else lambda model, x: model(x)
+        call = (
+            nnx.jit(lambda model, x: model(x)) if use_jit else lambda model, x: model(x)
+        )
 
         y = call(linear, jnp.array(in_embeddings))
         numpy_snapshot.assert_match(y, test_name="test_linear")
@@ -41,7 +43,9 @@ class TestLayers:
         )
         embedding.weight = jnp.array(embedding_weight)
 
-        call = nnx.jit(lambda model, x: model(x)) if use_jit else lambda model, x: model(x)
+        call = (
+            nnx.jit(lambda model, x: model(x)) if use_jit else lambda model, x: model(x)
+        )
 
         y = call(embedding, jnp.array(in_indices))
         numpy_snapshot.assert_match(y, test_name="test_embedding")
@@ -54,7 +58,9 @@ class TestLayers:
         rms_norm = layers.RMSNorm(d_model=d_model, eps=1e-5)
         rms_norm.weight = jnp.array(reference_weights)
 
-        call = nnx.jit(lambda model, x: model(x)) if use_jit else lambda model, x: model(x)
+        call = (
+            nnx.jit(lambda model, x: model(x)) if use_jit else lambda model, x: model(x)
+        )
 
         y = call(rms_norm, jnp.array(in_embeddings))
         numpy_snapshot.assert_match(y, test_name="test_rmsnorm")
@@ -73,7 +79,9 @@ class TestLayers:
         swiglu.in_project_layer_3.weight = jnp.array(w3_weight)
         swiglu.out_project_layer_2.weight = jnp.array(w2_weight)
 
-        call = nnx.jit(lambda model, x: model(x)) if use_jit else lambda model, x: model(x)
+        call = (
+            nnx.jit(lambda model, x: model(x)) if use_jit else lambda model, x: model(x)
+        )
 
         y = call(swiglu, jnp.array(in_embeddings))
         numpy_snapshot.assert_match(y, test_name="test_swiglu")
@@ -105,12 +113,18 @@ class TestLayers:
             d_model=d_model, num_heads=n_heads, rngs=nnx.Rngs(jax.random.key(42))
         )
         multi_head_self_attention.combined_in_projection.weight = jnp.concatenate(
-            [jnp.array(q_proj_weight), jnp.array(k_proj_weight), jnp.array(v_proj_weight)],
+            [
+                jnp.array(q_proj_weight),
+                jnp.array(k_proj_weight),
+                jnp.array(v_proj_weight),
+            ],
             axis=0,
         )
         multi_head_self_attention.out_projection.weight = jnp.array(o_proj_weight)
 
-        call = nnx.jit(lambda model, x: model(x)) if use_jit else lambda model, x: model(x)
+        call = (
+            nnx.jit(lambda model, x: model(x)) if use_jit else lambda model, x: model(x)
+        )
 
         y = call(multi_head_self_attention, jnp.array(in_embeddings))
         numpy_snapshot.assert_match(y, test_name="test_multihead_self_attention")
@@ -135,26 +149,39 @@ class TestLayers:
         pos_ids = einops.rearrange(jnp.array(pos_ids), "seq -> 1 seq")
         rope = layers.RoPE(theta=theta, d_k=d_model // n_heads, max_seq_len=n_keys)
         multi_head_self_attention = layers.MultiHeadSelfAttention(
-            d_model=d_model, num_heads=n_heads, rngs=nnx.Rngs(jax.random.key(42)), rope=rope
+            d_model=d_model, num_heads=n_heads, rngs=nnx.Rngs(jax.random.key(42))
         )
         multi_head_self_attention.combined_in_projection.weight = jnp.concatenate(
-            [jnp.array(q_proj_weight), jnp.array(k_proj_weight), jnp.array(v_proj_weight)],
+            [
+                jnp.array(q_proj_weight),
+                jnp.array(k_proj_weight),
+                jnp.array(v_proj_weight),
+            ],
             axis=0,
         )
         multi_head_self_attention.out_projection.weight = jnp.array(o_proj_weight)
 
         call = (
-            nnx.jit(lambda model, x, token_positions: model(x, token_positions=token_positions))
+            nnx.jit(
+                lambda model, x, rope, token_positions: model(
+                    x, token_positions=token_positions, rope=rope
+                )
+            )
             if use_jit
-            else lambda model, x, token_positions: model(x, token_positions=token_positions)
+            else lambda model, x, rope, token_positions: model(
+                x, token_positions=token_positions, rope=rope
+            )
         )
 
         y = call(
             multi_head_self_attention,
             jnp.array(in_embeddings),
             token_positions=jnp.array(pos_ids),
+            rope=rope,
         )
-        numpy_snapshot.assert_match(y, test_name="test_multihead_self_attention_with_rope")
+        numpy_snapshot.assert_match(
+            y, test_name="test_multihead_self_attention_with_rope"
+        )
 
     def test_transformer_block(
         self,
@@ -180,7 +207,6 @@ class TestLayers:
             num_heads=n_heads,
             d_ff=d_ff,
             rngs=nnx.Rngs(jax.random.key(42)),
-            rope=rope,
         )
         transformer_block.rms_norm_pre_attn.weight = nnx.Param(
             jnp.array(block_weights["ln1.weight"])
@@ -213,14 +239,25 @@ class TestLayers:
         )
 
         call = (
-            nnx.jit(lambda model, x, token_positions: model(in_features=x, token_positions=token_positions))
+            nnx.jit(
+                lambda model, x, rope, token_positions: model(
+                    in_features=x,
+                    token_positions=token_positions,
+                    rope=rope,
+                )
+            )
             if use_jit
-            else lambda model, x, token_positions: model(in_features=x, token_positions=token_positions)
+            else lambda model, x, rope, token_positions: model(
+                in_features=x,
+                token_positions=token_positions,
+                rope=rope,
+            )
         )
 
         y = call(
             transformer_block,
             jnp.array(in_embeddings),
             token_positions=jnp.arange(in_embeddings.shape[-2]),
+            rope=rope,
         )
         numpy_snapshot.assert_match(y, test_name="test_transformer_block")

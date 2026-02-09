@@ -3,6 +3,7 @@
 import dataclasses
 import math
 
+import jax
 import jax.numpy as jnp
 
 from absl import flags
@@ -74,22 +75,23 @@ class TransformerLm(nnx.Module):
             d_k=config.d_model // config.num_heads,
             max_seq_len=config.context_length,
         )
-        self.transformer_blocks = nnx.List(
-            [
-                L.TransformerBlock(
+
+        @nnx.vmap(transform_metadata={nnx.PARTITION_NAME: None}, in_axes=(0,))
+        def _create_transformer_block(rngs: nnx.Rngs) -> L.TransformerBlock:
+            return L.TransformerBlock(
+                d_model=config.d_model,
+                num_heads=config.num_heads,
+                d_ff=self._get_d_ff(
                     d_model=config.d_model,
-                    num_heads=config.num_heads,
-                    d_ff=self._get_d_ff(
-                        d_model=config.d_model,
-                        d_ff_to_d_model=config.d_ff_to_d_model,
-                        d_ff=config.d_ff,
-                    ),
-                    rngs=rngs,
-                    rope=self.rope,
-                    dtype=dtype,
-                )
-                for _ in range(config.num_layers)
-            ]
+                    d_ff_to_d_model=config.d_ff_to_d_model,
+                    d_ff=config.d_ff,
+                ),
+                rngs=rngs,
+                dtype=dtype,
+            )
+
+        self.transformer_blocks = _create_transformer_block(
+            rngs.fork(split=config.num_layers)
         )
         self.ln_final = L.RMSNorm(d_model=config.d_model, dtype=dtype)
         self.lm_head = L.Linear(
@@ -104,11 +106,20 @@ class TransformerLm(nnx.Module):
     ) -> Float[jnp.ndarray, "... seq_len vocab_size"]:
         activation = self.token_embeddings(input_tokens)
         token_positions = jnp.arange(input_tokens.shape[-1])
-        for transformer_block in self.transformer_blocks:
-            activation = transformer_block(
-                in_features=activation,
-                token_positions=token_positions,
+
+        def scan_over_transformer_blocks(activation, transformer_block):
+            return (
+                transformer_block(
+                    in_features=activation,
+                    token_positions=token_positions,
+                    rope=self.rope,
+                ),
+                None,
             )
+
+        activation, _ = jax.lax.scan(
+            scan_over_transformer_blocks, activation, self.transformer_blocks
+        )
         activation = self.ln_final(activation)
         return self.lm_head(activation)
 

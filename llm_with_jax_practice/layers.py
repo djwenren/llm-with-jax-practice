@@ -175,7 +175,6 @@ class MultiHeadSelfAttention(nnx.Module):
         d_model: int,
         num_heads: int,
         rngs: nnx.Rngs,
-        rope: RoPE | None = None,
         dtype: jnp.dtype = jnp.float32,
     ):
         assert (
@@ -184,7 +183,6 @@ class MultiHeadSelfAttention(nnx.Module):
         d_head = d_model // num_heads
         self.num_heads = num_heads
         self.d_head = d_head
-        self.rope = rope
         self.combined_in_projection = Linear(
             in_features=d_model,
             out_features=3 * d_model,
@@ -202,6 +200,7 @@ class MultiHeadSelfAttention(nnx.Module):
         self,
         in_features: Float[Array, "... seq_len d_model"],
         token_positions: Int[Array, "... seq_len"] | None = None,
+        rope: RoPE | None = None,
     ) -> Float[Array, "... seq_len d_model"]:
         combined_in_projection = self.combined_in_projection(in_features)
         query, key, value = jnp.split(combined_in_projection, 3, axis=-1)
@@ -220,9 +219,9 @@ class MultiHeadSelfAttention(nnx.Module):
             "... seq_len (num_heads d_head) -> ... num_heads seq_len d_head",
             num_heads=self.num_heads,
         )
-        if self.rope is not None and token_positions is not None:
-            query = self.rope(query, token_positions)
-            key = self.rope(key, token_positions)
+        if rope is not None and token_positions is not None:
+            query = rope(query, token_positions)
+            key = rope(key, token_positions)
         seq_len = query.shape[-2]
         mask = jnp.tril(jnp.ones((seq_len, seq_len), dtype=jnp.bool))
         scaled_dot_product_attention_result = functions.scaled_dot_product_attention(
@@ -245,14 +244,13 @@ class TransformerBlock(nnx.Module):
         num_heads: int,
         d_ff: int,
         rngs: nnx.Rngs,
-        rope: RoPE | None = None,
         dtype: jnp.dtype = jnp.float32,
         *,
         eps: float = 1e-5,
     ):
         self.rms_norm_pre_attn = RMSNorm(d_model=d_model, eps=eps, dtype=dtype)
         self.attn = MultiHeadSelfAttention(
-            d_model=d_model, num_heads=num_heads, rngs=rngs, rope=rope, dtype=dtype
+            d_model=d_model, num_heads=num_heads, rngs=rngs, dtype=dtype
         )
         self.rms_norm_pre_ff = RMSNorm(d_model=d_model, eps=eps, dtype=dtype)
         self.ffn = SwiGLU(d_model=d_model, d_ff=d_ff, rngs=rngs, dtype=dtype)
@@ -261,9 +259,12 @@ class TransformerBlock(nnx.Module):
         self,
         in_features: Float[Array, "... seq_len d_model"],
         token_positions: Int[Array, "... seq_len"],
+        rope: RoPE | None = None,
     ) -> Float[Array, "... seq_len d_model"]:
         activation = self.rms_norm_pre_attn(in_features)
-        activation = self.attn(in_features=activation, token_positions=token_positions)
+        activation = self.attn(
+            in_features=activation, token_positions=token_positions, rope=rope
+        )
         post_attn_block_activation = in_features + activation
         activation = self.rms_norm_pre_ff(post_attn_block_activation)
         activation = self.ffn(activation)
