@@ -3,7 +3,7 @@
 import grain
 import jax
 import jax.numpy as jnp
-import wandb
+import numpy as np
 
 from absl import logging
 from flax import nnx
@@ -11,9 +11,44 @@ from jaxtyping import Int
 from jaxtyping import Float
 from tqdm import tqdm
 
+import wandb
+
 from llm_with_jax_practice import checkpoint
+from llm_with_jax_practice import data_loader
 from llm_with_jax_practice import functions
 from llm_with_jax_practice import train_config as _train_config
+from llm_with_jax_practice import transformer
+
+
+def get_datasets(
+    training_data_source_path: str,
+    validation_data_source_path: str,
+    train_config: _train_config.TrainConfig,
+    model_config: transformer.TransformerConfig,
+    seed: int,
+) -> tuple[grain.IterDataset, grain.IterDataset]:
+    """Gets the training and validation datasets."""
+    training_token_data = np.load(training_data_source_path, mmap_mode="r")
+    validation_token_data = np.load(validation_data_source_path, mmap_mode="r")
+    training_dataset = data_loader.get_dataset(
+        np_data=training_token_data,
+        context_length=model_config.context_length,
+        batch_size=train_config.training_batch_size,
+        shuffle=True,
+        seed=seed,
+        use_repeat=True,
+        num_repeats=None,
+    )
+    validation_dataset = data_loader.get_dataset(
+        np_data=validation_token_data,
+        context_length=model_config.context_length,
+        batch_size=train_config.validation_batch_size,
+        shuffle=True,
+        seed=seed,
+        use_repeat=True,
+        num_repeats=None,
+    )
+    return training_dataset, validation_dataset
 
 
 @nnx.jit()

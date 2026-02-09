@@ -80,34 +80,6 @@ def _reconcile_train_config_and_model_config(
     return train_config, model_config
 
 
-def _get_datasets(
-    train_config: _train_config.TrainConfig,
-    model_config: transformer.TransformerConfig,
-) -> tuple[grain.IterDataset, grain.IterDataset]:
-    """Gets the training and validation datasets."""
-    training_token_data = np.load(_training_data_source_path.value, mmap_mode="r")
-    validation_token_data = np.load(_validation_data_source_path.value, mmap_mode="r")
-    training_dataset = data_loader.get_dataset(
-        np_data=training_token_data,
-        context_length=model_config.context_length,
-        batch_size=train_config.training_batch_size,
-        shuffle=True,
-        seed=42,
-        use_repeat=False,
-        num_repeats=None,
-    )
-    validation_dataset = data_loader.get_dataset(
-        np_data=validation_token_data,
-        context_length=model_config.context_length,
-        batch_size=train_config.validation_batch_size,
-        shuffle=True,
-        seed=42,
-        use_repeat=True,
-        num_repeats=None,
-    )
-    return training_dataset, validation_dataset
-
-
 def _get_model_and_optimizer(
     train_config: _train_config.TrainConfig,
     model_config: transformer.TransformerConfig,
@@ -200,9 +172,12 @@ def main(argv: Sequence[str]) -> None:
         model_config=model_config,
         ckpt_manager=ckpt_manager,
     )
-    training_dataset, validation_dataset = _get_datasets(
+    training_dataset, validation_dataset = train_utils.get_datasets(
+        training_data_source_path=_training_data_source_path.value,
+        validation_data_source_path=_validation_data_source_path.value,
         train_config=train_config,
         model_config=model_config,
+        seed=42,
     )
     logging.info(
         "Model and optimizer loaded. Starting training loop with train config: %s",
