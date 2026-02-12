@@ -7,6 +7,7 @@ import numpy as np
 
 from flax import nnx
 from jax import Array
+from jax.sharding import PartitionSpec as P
 from jaxtyping import Float
 from jaxtyping import Int
 
@@ -21,21 +22,35 @@ class Linear(nnx.Module):
         in_features: int,
         out_features: int,
         rngs: nnx.Rngs,
+        *,
         dtype: jnp.dtype = jnp.float32,
+        sharding: P | None = None,
     ):
         std = np.sqrt(2.0 / (in_features + out_features))
         self.weight = nnx.Param(
             rngs.truncated_normal(
-                shape=(out_features, in_features),
+                shape=(in_features, out_features),
                 lower=-3.0 * std,
                 upper=3.0 * std,
                 dtype=dtype,
+                out_sharding=sharding,
             )
             * std
         )
 
-    def __call__(self, x: Float[Array, "... d_in"]) -> Float[Array, "... d_out"]:
-        return einops.einsum(x, self.weight, "... d_in, d_out d_in -> ... d_out")
+    def __call__(
+        self,
+        x: Float[Array, "... d_in"],
+        *,
+        weight_resharding: P | None = None,
+        out_sharding: P | None = None,
+    ) -> Float[Array, "... d_out"]:
+        if weight_resharding is not None:
+            weight = jax.reshard(self.weight, weight_resharding)
+        else:
+            weight = self.weight
+        output = jnp.matmul(x, weight, out_sharding=out_sharding)
+        return output
 
 
 class Embedding(nnx.Module):
@@ -46,7 +61,9 @@ class Embedding(nnx.Module):
         num_embeddings: int,
         embedding_dim: int,
         rngs: nnx.Rngs,
+        *,
         dtype=jnp.float32,
+        embedding_matrix_sharding: P | None = None,
     ):
         self.weight = nnx.Param(
             rngs.truncated_normal(
@@ -54,13 +71,14 @@ class Embedding(nnx.Module):
                 lower=-3.0,
                 upper=3.0,
                 dtype=dtype,
+                out_sharding=embedding_matrix_sharding,
             )
         )
 
     def __call__(
-        self, token_ids: Int[Array, "..."]
+        self, token_ids: Int[Array, "..."], *, out_sharding: P | None = None
     ) -> Float[Array, "... embedding_dim"]:
-        return self.weight[token_ids]
+        return self.weight.at[token_ids].get(out_sharding=out_sharding)
 
 
 class RMSNorm(nnx.Module):
@@ -70,10 +88,14 @@ class RMSNorm(nnx.Module):
         self,
         d_model: int,
         eps: float = 1e-6,
+        *,
         dtype=jnp.float32,
+        weight_sharding: P | None = None,
     ):
         self.eps = eps
-        self.weight = nnx.Param(jnp.ones((d_model,), dtype=dtype))
+        self.weight = nnx.Param(
+            jnp.ones((d_model,), dtype=dtype, out_sharding=weight_sharding)
+        )
 
     def __call__(self, x: Float[Array, "... d_model"]) -> Float[Array, "... d_model"]:
         in_dtype = x.dtype
@@ -94,31 +116,60 @@ class SwiGLU(nnx.Module):
         d_model: int,
         d_ff: int,
         rngs: nnx.Rngs,
+        *,
+        up_projection_weight_sharding: P | None = None,
+        down_projection_weight_sharding: P | None = None,
         dtype=jnp.float32,
     ):
-        self.in_project_layer_1 = Linear(
+        self.w1_projection = Linear(
             in_features=d_model,
             out_features=d_ff,
             rngs=rngs,
             dtype=dtype,
+            sharding=up_projection_weight_sharding,
         )
-        self.in_project_layer_3 = Linear(
+        self.w3_projection = Linear(
             in_features=d_model,
             out_features=d_ff,
             rngs=rngs,
             dtype=dtype,
+            sharding=up_projection_weight_sharding,
         )
-        self.out_project_layer_2 = Linear(
+        self.w2_projection = Linear(
             in_features=d_ff,
             out_features=d_model,
             rngs=rngs,
             dtype=dtype,
+            sharding=down_projection_weight_sharding,
         )
 
-    def __call__(self, x: Float[Array, "... d_model"]) -> Float[Array, "... d_model"]:
-        out_1 = self.in_project_layer_1(x)
-        out_3 = self.in_project_layer_3(x)
-        return self.out_project_layer_2(functions.silu(out_1) * out_3)
+    def __call__(
+        self,
+        x: Float[Array, "... d_model"],
+        *,
+        x_resharding: P | None = None,
+        up_projection_weight_resharding: P | None = None,
+        up_projection_out_sharding: P | None = None,
+        down_projection_weight_resharding: P | None = None,
+        down_projection_out_sharding: P | None = None,
+    ) -> Float[Array, "... d_model"]:
+        if x_resharding is not None:
+            x = jax.reshard(x, x_resharding)
+        w1_out = self.w1_projection(
+            x,
+            weight_resharding=up_projection_weight_resharding,
+            out_sharding=up_projection_out_sharding,
+        )
+        w3_out = self.w3_projection(
+            x,
+            weight_resharding=up_projection_weight_resharding,
+            out_sharding=up_projection_out_sharding,
+        )
+        return self.w2_projection(
+            functions.silu(w1_out) * w3_out,
+            weight_resharding=down_projection_weight_resharding,
+            out_sharding=down_projection_out_sharding,
+        )
 
 
 class RoPE(nnx.Module):

@@ -1,19 +1,23 @@
 """Tests for layers."""
 
 import jax
+
+jax.config.update("jax_num_cpu_devices", 8)
+
 import jax.numpy as jnp
 import pytest
 import einops
 
 from flax import nnx
+from jax.sharding import PartitionSpec as P
 
 from llm_with_jax_practice import layers
 
 
-@pytest.mark.parametrize("use_jit", [False, True])
 class TestLayers:
     """Tests for layers."""
 
+    @pytest.mark.parametrize("use_jit", [False, True])
     def test_linear(
         self, use_jit, numpy_snapshot, ts_state_dict, in_embeddings, d_model, d_ff
     ):
@@ -22,7 +26,7 @@ class TestLayers:
         linear = layers.Linear(
             in_features=d_model, out_features=d_ff, rngs=nnx.Rngs(jax.random.key(42))
         )
-        linear.weight = jnp.array(w1_weight)
+        linear.weight = jnp.array(w1_weight).transpose()
 
         call = (
             nnx.jit(lambda model, x: model(x)) if use_jit else lambda model, x: model(x)
@@ -31,6 +35,67 @@ class TestLayers:
         y = call(linear, jnp.array(in_embeddings))
         numpy_snapshot.assert_match(y, test_name="test_linear")
 
+    @pytest.mark.parametrize("use_jit", [False, True])
+    def test_linear_sharding(
+        self, use_jit, numpy_snapshot, ts_state_dict, in_embeddings, d_model, d_ff
+    ):
+        """Test linear layer with sharding."""
+        w1_weight = ts_state_dict[0]["layers.0.ffn.w1.weight"]
+        # This by default returns a mesh with explicit axis types.
+        mesh = jax.make_mesh((4, 2), ("X", "Y"))
+        with jax.set_mesh(mesh):
+            linear = layers.Linear(
+                in_features=d_model,
+                out_features=d_ff,
+                rngs=nnx.Rngs(jax.random.key(42)),
+                sharding=P(None, "Y"),
+            )
+            call = (
+                nnx.jit(lambda model, x: model(x))
+                if use_jit
+                else lambda model, x: model(x)
+            )
+            x = jax.device_put(jnp.array(in_embeddings), P("X", None))
+            y = call(linear, x)
+            assert y.sharding.spec == P("X", None, "Y")
+
+            linear.weight = jax.device_put(
+                jnp.array(w1_weight).transpose(), P(None, "Y")
+            )
+            y = call(linear, x)
+            numpy_snapshot.assert_match(y, test_name="test_linear")
+            assert y.sharding.spec == P("X", None, "Y")
+
+    def test_linear_sharding_and_reduce_scatter(
+        self, numpy_snapshot, ts_state_dict, in_embeddings, d_model, d_ff
+    ):
+        """Test linear layer with sharding."""
+        w1_weight = ts_state_dict[0]["layers.0.ffn.w1.weight"]
+        mesh = jax.make_mesh((4, 2), ("X", "Y"))
+        with jax.set_mesh(mesh):
+            linear = layers.Linear(
+                in_features=d_model,
+                out_features=d_ff,
+                rngs=nnx.Rngs(jax.random.key(42)),
+                sharding=P("Y", None),
+            )
+
+            @nnx.jit
+            def call(model, x):
+                return model(x, out_sharding=P("X", None, "Y"))
+
+            x = jax.device_put(jnp.array(in_embeddings), P("X", None, "Y"))
+            y = call(linear, x)
+            assert y.sharding.spec == P("X", None, "Y")
+
+            linear.weight = jax.device_put(
+                jnp.array(w1_weight).transpose(), P("Y", None)
+            )
+            y = call(linear, x)
+            numpy_snapshot.assert_match(y, test_name="test_linear")
+            assert y.sharding.spec == P("X", None, "Y")
+
+    @pytest.mark.parametrize("use_jit", [False, True])
     def test_embedding(
         self, use_jit, numpy_snapshot, ts_state_dict, in_indices, vocab_size, d_model
     ):
@@ -50,6 +115,35 @@ class TestLayers:
         y = call(embedding, jnp.array(in_indices))
         numpy_snapshot.assert_match(y, test_name="test_embedding")
 
+    @pytest.mark.parametrize("use_jit", [False, True])
+    def test_embedding_sharding(
+        self, use_jit, numpy_snapshot, ts_state_dict, in_indices, vocab_size, d_model
+    ):
+        """Test embedding layer with sharding."""
+        embedding_weight = ts_state_dict[0]["token_embeddings.weight"]
+        mesh = jax.make_mesh((4, 2), ("X", "Y"))
+        with jax.set_mesh(mesh):
+            embedding = layers.Embedding(
+                num_embeddings=vocab_size,
+                embedding_dim=d_model,
+                rngs=nnx.Rngs(jax.random.key(42)),
+                embedding_matrix_sharding=P(None, "Y"),
+            )
+            call = (
+                nnx.jit(lambda model, x: model(x, out_sharding=P("X", None, "Y")))
+                if use_jit
+                else lambda model, x: model(x, out_sharding=P("X", None, "Y"))
+            )
+            x = jax.device_put(jnp.array(in_indices), P("X", None))
+            y = call(embedding, x)
+            assert y.sharding.spec == P("X", None, "Y")
+
+            embedding.weight = jax.device_put(jnp.array(embedding_weight), P(None, "Y"))
+            y = call(embedding, x)
+            numpy_snapshot.assert_match(y, test_name="test_embedding")
+            assert y.sharding.spec == P("X", None, "Y")
+
+    @pytest.mark.parametrize("use_jit", [False, True])
     def test_rmsnorm(self, use_jit, numpy_snapshot, ts_state_dict, in_embeddings):
         """Test RMSNorm layer."""
         state_dict, _ = ts_state_dict
@@ -65,6 +159,50 @@ class TestLayers:
         y = call(rms_norm, jnp.array(in_embeddings))
         numpy_snapshot.assert_match(y, test_name="test_rmsnorm")
 
+    @pytest.mark.parametrize("use_jit", [False, True])
+    def test_rmsnorm_sharding(
+        self, use_jit, numpy_snapshot, ts_state_dict, in_embeddings
+    ):
+        """Test RMSNorm layer with sharding."""
+        state_dict, _ = ts_state_dict
+        reference_weights = state_dict["layers.1.ln1.weight"]
+        d_model = reference_weights.shape[0]
+        mesh = jax.make_mesh((4, 2), ("X", "Y"))
+        with jax.set_mesh(mesh):
+            rms_norm = layers.RMSNorm(
+                d_model=d_model,
+                eps=1e-5,
+                weight_sharding=P(
+                    None,
+                ),
+            )
+            call = (
+                nnx.jit(lambda model, x: model(x))
+                if use_jit
+                else lambda model, x: model(x)
+            )
+            x = jax.device_put(jnp.array(in_embeddings), P("X", None))
+            y = call(rms_norm, x)
+            assert y.sharding.spec == P("X", None, None)
+
+            rms_norm.weight = jax.device_put(
+                jnp.array(reference_weights),
+                P(
+                    None,
+                ),
+            )
+            y = call(rms_norm, x)
+            numpy_snapshot.assert_match(y, test_name="test_rmsnorm")
+            assert y.sharding.spec == P("X", None, None)
+
+        call = (
+            nnx.jit(lambda model, x: model(x)) if use_jit else lambda model, x: model(x)
+        )
+
+        y = call(rms_norm, jnp.array(in_embeddings))
+        numpy_snapshot.assert_match(y, test_name="test_rmsnorm")
+
+    @pytest.mark.parametrize("use_jit", [False, True])
     def test_swiglu(
         self, use_jit, numpy_snapshot, ts_state_dict, in_embeddings, d_model, d_ff
     ):
@@ -75,9 +213,9 @@ class TestLayers:
         swiglu = layers.SwiGLU(
             d_model=d_model, d_ff=d_ff, rngs=nnx.Rngs(jax.random.key(42))
         )
-        swiglu.in_project_layer_1.weight = jnp.array(w1_weight)
-        swiglu.in_project_layer_3.weight = jnp.array(w3_weight)
-        swiglu.out_project_layer_2.weight = jnp.array(w2_weight)
+        swiglu.w1_projection.weight = jnp.array(w1_weight).transpose()
+        swiglu.w3_projection.weight = jnp.array(w3_weight).transpose()
+        swiglu.w2_projection.weight = jnp.array(w2_weight).transpose()
 
         call = (
             nnx.jit(lambda model, x: model(x)) if use_jit else lambda model, x: model(x)
@@ -86,6 +224,89 @@ class TestLayers:
         y = call(swiglu, jnp.array(in_embeddings))
         numpy_snapshot.assert_match(y, test_name="test_swiglu")
 
+    @pytest.mark.parametrize("use_jit", [False, True])
+    def test_swiglu_sharding(
+        self, use_jit, numpy_snapshot, ts_state_dict, in_embeddings, d_model, d_ff
+    ):
+        """Test SwiGLU layer."""
+        w1_weight, w2_weight, w3_weight = [
+            ts_state_dict[0][f"layers.0.ffn.{k}.weight"] for k in ["w1", "w2", "w3"]
+        ]
+        mesh = jax.make_mesh((4, 2), ("X", "Y"))
+        with jax.set_mesh(mesh):
+            swiglu = layers.SwiGLU(
+                d_model=d_model,
+                d_ff=d_ff,
+                rngs=nnx.Rngs(jax.random.key(42)),
+                up_projection_weight_sharding=P("X", "Y"),
+                down_projection_weight_sharding=P("Y", "X"),
+            )
+
+            def call(
+                model,
+                x,
+                *,
+                x_resharding,
+                up_projection_out_sharding,
+                up_projection_weight_resharding,
+                down_projection_out_sharding,
+                down_projection_weight_resharding,
+            ):
+                return model(
+                    x,
+                    x_resharding=x_resharding,
+                    up_projection_out_sharding=up_projection_out_sharding,
+                    up_projection_weight_resharding=up_projection_weight_resharding,
+                    down_projection_out_sharding=down_projection_out_sharding,
+                    down_projection_weight_resharding=down_projection_weight_resharding,
+                )
+
+            if use_jit:
+                call = nnx.jit(
+                    call,
+                    static_argnames=[
+                        "x_resharding",
+                        "up_projection_out_sharding",
+                        "up_projection_weight_resharding",
+                        "down_projection_out_sharding",
+                        "down_projection_weight_resharding",
+                    ],
+                )
+
+            x = jax.device_put(jnp.array(in_embeddings), P("X", None, "Y"))
+            y = call(
+                swiglu,
+                x,
+                x_resharding=P("X", None, None),
+                up_projection_weight_resharding=P(None, "Y"),
+                up_projection_out_sharding=P("X", None, "Y"),
+                down_projection_weight_resharding=P("Y", None),
+                down_projection_out_sharding=P("X", None, "Y"),
+            )
+            assert y.sharding.spec == P("X", None, "Y")
+
+            swiglu.w1_projection.weight = jax.device_put(
+                jnp.array(w1_weight).transpose(), P("X", "Y")
+            )
+            swiglu.w3_projection.weight = jax.device_put(
+                jnp.array(w3_weight).transpose(), P("X", "Y")
+            )
+            swiglu.w2_projection.weight = jax.device_put(
+                jnp.array(w2_weight).transpose(), P("Y", "X")
+            )
+            y = call(
+                swiglu,
+                x,
+                x_resharding=P("X", None, None),
+                up_projection_weight_resharding=P(None, "Y"),
+                up_projection_out_sharding=P("X", None, "Y"),
+                down_projection_weight_resharding=P("Y", None),
+                down_projection_out_sharding=P("X", None, "Y"),
+            )
+            numpy_snapshot.assert_match(y, test_name="test_swiglu")
+            assert y.sharding.spec == P("X", None, "Y")
+
+    @pytest.mark.parametrize("use_jit", [False, True])
     def test_rope(
         self, use_jit, numpy_snapshot, in_embeddings, d_model, theta, n_queries, pos_ids
     ):
@@ -101,6 +322,7 @@ class TestLayers:
         y = call(rope, jnp.array(in_embeddings), jnp.array(pos_ids))
         numpy_snapshot.assert_match(y, test_name="test_rope")
 
+    @pytest.mark.parametrize("use_jit", [False, True])
     def test_multihead_self_attention(
         self, use_jit, numpy_snapshot, in_embeddings, d_model, n_heads, ts_state_dict
     ):
@@ -114,13 +336,15 @@ class TestLayers:
         )
         multi_head_self_attention.combined_in_projection.weight = jnp.concatenate(
             [
-                jnp.array(q_proj_weight),
-                jnp.array(k_proj_weight),
-                jnp.array(v_proj_weight),
+                jnp.array(q_proj_weight).transpose(),
+                jnp.array(k_proj_weight).transpose(),
+                jnp.array(v_proj_weight).transpose(),
             ],
-            axis=0,
+            axis=-1,
         )
-        multi_head_self_attention.out_projection.weight = jnp.array(o_proj_weight)
+        multi_head_self_attention.out_projection.weight = jnp.array(
+            o_proj_weight
+        ).transpose()
 
         call = (
             nnx.jit(lambda model, x: model(x)) if use_jit else lambda model, x: model(x)
@@ -129,6 +353,7 @@ class TestLayers:
         y = call(multi_head_self_attention, jnp.array(in_embeddings))
         numpy_snapshot.assert_match(y, test_name="test_multihead_self_attention")
 
+    @pytest.mark.parametrize("use_jit", [False, True])
     def test_multihead_self_attention_with_rope(
         self,
         use_jit,
@@ -153,13 +378,15 @@ class TestLayers:
         )
         multi_head_self_attention.combined_in_projection.weight = jnp.concatenate(
             [
-                jnp.array(q_proj_weight),
-                jnp.array(k_proj_weight),
-                jnp.array(v_proj_weight),
+                jnp.array(q_proj_weight).transpose(),
+                jnp.array(k_proj_weight).transpose(),
+                jnp.array(v_proj_weight).transpose(),
             ],
-            axis=0,
+            axis=-1,
         )
-        multi_head_self_attention.out_projection.weight = jnp.array(o_proj_weight)
+        multi_head_self_attention.out_projection.weight = jnp.array(
+            o_proj_weight
+        ).transpose()
 
         call = (
             nnx.jit(
@@ -183,6 +410,7 @@ class TestLayers:
             y, test_name="test_multihead_self_attention_with_rope"
         )
 
+    @pytest.mark.parametrize("use_jit", [False, True])
     def test_transformer_block(
         self,
         use_jit,
@@ -214,28 +442,28 @@ class TestLayers:
         transformer_block.attn.combined_in_projection.weight = nnx.Param(
             jnp.concatenate(
                 [
-                    jnp.array(block_weights["attn.q_proj.weight"]),
-                    jnp.array(block_weights["attn.k_proj.weight"]),
-                    jnp.array(block_weights["attn.v_proj.weight"]),
+                    jnp.array(block_weights["attn.q_proj.weight"]).transpose(),
+                    jnp.array(block_weights["attn.k_proj.weight"]).transpose(),
+                    jnp.array(block_weights["attn.v_proj.weight"]).transpose(),
                 ],
-                axis=0,
+                axis=-1,
             )
         )
         transformer_block.attn.out_projection.weight = nnx.Param(
-            jnp.array(block_weights["attn.output_proj.weight"])
+            jnp.array(block_weights["attn.output_proj.weight"]).transpose()
         )
 
         transformer_block.rms_norm_pre_ff.weight = nnx.Param(
             jnp.array(block_weights["ln2.weight"])
         )
-        transformer_block.ffn.in_project_layer_1.weight = nnx.Param(
-            jnp.array(block_weights["ffn.w1.weight"])
+        transformer_block.ffn.w1_projection.weight = nnx.Param(
+            jnp.array(block_weights["ffn.w1.weight"]).transpose()
         )
-        transformer_block.ffn.in_project_layer_3.weight = nnx.Param(
-            jnp.array(block_weights["ffn.w3.weight"])
+        transformer_block.ffn.w3_projection.weight = nnx.Param(
+            jnp.array(block_weights["ffn.w3.weight"]).transpose()
         )
-        transformer_block.ffn.out_project_layer_2.weight = nnx.Param(
-            jnp.array(block_weights["ffn.w2.weight"])
+        transformer_block.ffn.w2_projection.weight = nnx.Param(
+            jnp.array(block_weights["ffn.w2.weight"]).transpose()
         )
 
         call = (
