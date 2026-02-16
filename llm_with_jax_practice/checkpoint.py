@@ -6,14 +6,59 @@ import os
 from typing import Any
 from typing import Sequence
 
+import jax
 import optax
 import orbax.checkpoint as ocp
 
 from flax import nnx
 from jaxtyping import PyTree
 
-from llm_with_jax_practice import train_config
+from llm_with_jax_practice import _train_config
 from llm_with_jax_practice import transformer
+
+
+def _canonicalize_sharding(tree: PyTree[Any]) -> PyTree[Any]:
+    """Canonicalizes the sharding of the tree.
+
+    When restoring a checkpoing, we typically pass in an abstract model to restore into. Such
+    abstract models are typically constructed using `nnx.eval_shape` or `nnx.get_abstract_model`.
+    These functions will abstract the physical meshes (CPUs, GPUs, or TPUs) into an `AbstractMesh`.
+    Currently, Orbax cannot restore a checkpoint into an `AbstractMesh`, and will raise errors like:
+
+    ```
+    ValueError: _device_assignment is not implemented for `jax.sharding.AbstractMesh`
+    ```
+
+    This function canonicalizes the sharding of the tree to a `NamedSharding` with a restored
+    physical mesh.
+
+    Args:
+        tree: The tree to canonicalize.
+
+    Returns:
+        The canonicalized tree.
+    """
+    try:
+        mesh = jax.sharding.get_mesh()
+    except RuntimeError:
+        mesh = None
+
+    if mesh is None or isinstance(mesh, jax.sharding.AbstractMesh):
+        return tree
+
+    def fix_sharding(x):
+        if hasattr(x, "sharding") and isinstance(
+            x.sharding, jax.sharding.NamedSharding
+        ):
+            if isinstance(x.sharding.mesh, jax.sharding.AbstractMesh):
+                return jax.ShapeDtypeStruct(
+                    x.shape,
+                    x.dtype,
+                    sharding=jax.sharding.NamedSharding(mesh, x.sharding.spec),
+                )
+        return x
+
+    return jax.tree_util.tree_map(fix_sharding, tree)
 
 
 class CheckpointManager:
@@ -25,7 +70,7 @@ class CheckpointManager:
         max_to_keep: int = 3,
         save_interval_steps: int = 2,
         *,
-        train_config: train_config.TrainConfig | None = None,
+        train_config: _train_config.TrainConfig | None = None,
         model_config: transformer.TransformerConfig | None = None,
     ):
         self._ocp_checkpoint_manager_options = ocp.CheckpointManagerOptions(
@@ -69,9 +114,17 @@ class CheckpointManager:
         self, step: int, abstract_model: nnx.Module, tx: optax.GradientTransformation
     ) -> tuple[nnx.Module, nnx.Optimizer, PyTree[Any]]:
         """Restores the checkpoint."""
-        graph_def, abstract_model_state = nnx.split(abstract_model)
+        # 1. Canonicalize abstract model shardings
+        _, model_state = nnx.split(abstract_model)
+        abstract_model_state = _canonicalize_sharding(model_state)
+        nnx.update(abstract_model, abstract_model_state)
+
+        # 2. Create and canonicalize abstract optimizer shardings
         abstract_optimizer = nnx.Optimizer(abstract_model, tx, wrt=nnx.Param)
-        _, abstract_optimizer_state = nnx.split(abstract_optimizer)
+        _, optimizer_state = nnx.split(abstract_optimizer)
+        abstract_optimizer_state = _canonicalize_sharding(optimizer_state)
+
+        # 3. Restore using fixed shardings
         restored_args = self._ocp_checkpoint_manager.restore(
             step=step,
             args=ocp.args.Composite(
@@ -80,6 +133,7 @@ class CheckpointManager:
                 metadata=ocp.args.JsonRestore(),
             ),
         )
+        graph_def, _ = nnx.split(abstract_model)
         restored_model = nnx.merge(graph_def, restored_args.model_state)
         # We can't use the same `nnx.merge` call to restore the optimizer becasue the abstract
         # optimizer constructed above is linked to the abstract model's state (parameters). The
