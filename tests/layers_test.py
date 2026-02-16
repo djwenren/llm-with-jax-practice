@@ -78,11 +78,12 @@ class TestLayers:
                 out_features=d_ff,
                 rngs=nnx.Rngs(jax.random.key(42)),
                 sharding=P("Y", None),
+                out_sharding=P("X", None, "Y"),
             )
 
             @nnx.jit
             def call(model, x):
-                return model(x, out_sharding=P("X", None, "Y"))
+                return model(x)
 
             x = jax.device_put(jnp.array(in_embeddings), P("X", None, "Y"))
             y = call(linear, x)
@@ -128,11 +129,12 @@ class TestLayers:
                 embedding_dim=d_model,
                 rngs=nnx.Rngs(jax.random.key(42)),
                 embedding_matrix_sharding=P(None, "Y"),
+                out_sharding=P("X", None, "Y"),
             )
             call = (
-                nnx.jit(lambda model, x: model(x, out_sharding=P("X", None, "Y")))
+                nnx.jit(lambda model, x: model(x))
                 if use_jit
-                else lambda model, x: model(x, out_sharding=P("X", None, "Y"))
+                else lambda model, x: model(x)
             )
             x = jax.device_put(jnp.array(in_indices), P("X", None))
             y = call(embedding, x)
@@ -240,37 +242,18 @@ class TestLayers:
                 rngs=nnx.Rngs(jax.random.key(42)),
                 up_projection_weight_sharding=P("X", "Y"),
                 down_projection_weight_sharding=P("Y", "X"),
-            )
-
-            def call(
-                model,
-                x,
-                *,
-                up_projection_out_sharding,
-                down_projection_out_sharding,
-            ):
-                return model(
-                    x,
-                    up_projection_out_sharding=up_projection_out_sharding,
-                    down_projection_out_sharding=down_projection_out_sharding,
-                )
-
-            if use_jit:
-                call = nnx.jit(
-                    call,
-                    static_argnames=[
-                        "up_projection_out_sharding",
-                        "down_projection_out_sharding",
-                    ],
-                )
-
-            x = jax.device_put(jnp.array(in_embeddings), P("X", None, "Y"))
-            y = call(
-                swiglu,
-                x,
                 up_projection_out_sharding=P("X", None, "Y"),
                 down_projection_out_sharding=P("X", None, "Y"),
             )
+
+            call = (
+                nnx.jit(lambda model, x: model(x))
+                if use_jit
+                else lambda model, x: model(x)
+            )
+
+            x = jax.device_put(jnp.array(in_embeddings), P("X", None, "Y"))
+            y = call(swiglu, x)
             assert y.sharding.spec == P("X", None, "Y")
 
             swiglu.w1_projection.weight = jax.device_put(
@@ -282,12 +265,7 @@ class TestLayers:
             swiglu.w2_projection.weight = jax.device_put(
                 jnp.array(w2_weight).transpose(), P("Y", "X")
             )
-            y = call(
-                swiglu,
-                x,
-                up_projection_out_sharding=P("X", None, "Y"),
-                down_projection_out_sharding=P("X", None, "Y"),
-            )
+            y = call(swiglu, x)
             numpy_snapshot.assert_match(y, test_name="test_swiglu")
             assert y.sharding.spec == P("X", None, "Y")
 
@@ -355,38 +333,19 @@ class TestLayers:
                 rngs=nnx.Rngs(jax.random.key(42)),
                 combined_in_projection_weight_sharding=P("X", "Y"),
                 out_projection_weight_sharding=P("Y", "X"),
-            )
-
-            def call(
-                model,
-                x,
-                *,
-                combined_in_projection_out_sharding,
-                out_projection_out_sharding,
-            ):
-                return model(
-                    x,
-                    combined_in_projection_out_sharding=combined_in_projection_out_sharding,
-                    out_projection_out_sharding=out_projection_out_sharding,
-                )
-
-            if use_jit:
-                call = nnx.jit(
-                    call,
-                    static_argnames=[
-                        "combined_in_projection_out_sharding",
-                        "out_projection_out_sharding",
-                    ],
-                )
-
-            x = jax.device_put(jnp.array(in_embeddings), P("X", None, "Y"))
-
-            y = call(
-                multi_head_self_attention,
-                x,
                 combined_in_projection_out_sharding=P("X", None, "Y"),
                 out_projection_out_sharding=P("X", None, "Y"),
             )
+
+            call = (
+                nnx.jit(lambda model, x: model(x))
+                if use_jit
+                else lambda model, x: model(x)
+            )
+
+            x = jax.device_put(jnp.array(in_embeddings), P("X", None, "Y"))
+
+            y = call(multi_head_self_attention, x)
             assert y.sharding.spec == P("X", None, "Y")
 
             multi_head_self_attention.combined_in_projection.weight = jax.device_put(
@@ -404,12 +363,7 @@ class TestLayers:
                 jnp.array(o_proj_weight).transpose(),
                 P("Y", "X"),
             )
-            y = call(
-                multi_head_self_attention,
-                x,
-                combined_in_projection_out_sharding=P("X", None, "Y"),
-                out_projection_out_sharding=P("X", None, "Y"),
-            )
+            y = call(multi_head_self_attention, x)
             numpy_snapshot.assert_match(y, test_name="test_multihead_self_attention")
             assert y.sharding.spec == P("X", None, "Y")
 
@@ -498,33 +452,21 @@ class TestLayers:
                 rngs=nnx.Rngs(jax.random.key(42)),
                 combined_in_projection_weight_sharding=P("X", "Y"),
                 out_projection_weight_sharding=P("Y", "X"),
+                combined_in_projection_out_sharding=P("X", None, "Y"),
+                out_projection_out_sharding=P("X", None, "Y"),
             )
 
-            def call(
-                model,
-                x,
-                token_positions,
-                rope,
-                *,
-                combined_in_projection_out_sharding,
-                out_projection_out_sharding,
-            ):
-                return model(
-                    x,
-                    token_positions=token_positions,
-                    rope=rope,
-                    combined_in_projection_out_sharding=combined_in_projection_out_sharding,
-                    out_projection_out_sharding=out_projection_out_sharding,
+            call = (
+                nnx.jit(
+                    lambda model, x, token_positions, rope: model(
+                        x, token_positions=token_positions, rope=rope
+                    )
                 )
-
-            if use_jit:
-                call = nnx.jit(
-                    call,
-                    static_argnames=[
-                        "combined_in_projection_out_sharding",
-                        "out_projection_out_sharding",
-                    ],
+                if use_jit
+                else lambda model, x, token_positions, rope: model(
+                    x, token_positions=token_positions, rope=rope
                 )
+            )
 
             x = jax.device_put(jnp.array(in_embeddings), P("X", None, "Y"))
             y = call(
@@ -532,8 +474,6 @@ class TestLayers:
                 x,
                 token_positions=jnp.array(pos_ids),
                 rope=rope,
-                combined_in_projection_out_sharding=P("X", None, "Y"),
-                out_projection_out_sharding=P("X", None, "Y"),
             )
             assert y.sharding.spec == P("X", None, "Y")
 
@@ -557,8 +497,6 @@ class TestLayers:
                 x,
                 token_positions=jnp.array(pos_ids),
                 rope=rope,
-                combined_in_projection_out_sharding=P("X", None, "Y"),
-                out_projection_out_sharding=P("X", None, "Y"),
             )
             numpy_snapshot.assert_match(
                 y, test_name="test_multihead_self_attention_with_rope"
@@ -676,39 +614,27 @@ class TestLayers:
                 attn_out_projection_weight_sharding=P("Y", "X"),
                 ffn_up_projection_weight_sharding=P("X", "Y"),
                 ffn_down_projection_weight_sharding=P("Y", "X"),
+                attn_combined_in_projection_out_sharding=P("X", None, "Y"),
+                attn_out_projection_out_sharding=P("X", None, "Y"),
+                ffn_up_projection_out_sharding=P("X", None, "Y"),
+                ffn_down_projection_out_sharding=P("X", None, "Y"),
             )
 
-            def call(
-                model,
-                x,
-                rope,
-                token_positions,
-                *,
-                attn_combined_in_projection_out_sharding,
-                attn_out_projection_out_sharding,
-                ffn_up_projection_out_sharding,
-                ffn_down_projection_out_sharding,
-            ):
-                return model(
+            call = (
+                nnx.jit(
+                    lambda model, x, rope, token_positions: model(
+                        in_features=x,
+                        token_positions=token_positions,
+                        rope=rope,
+                    )
+                )
+                if use_jit
+                else lambda model, x, rope, token_positions: model(
                     in_features=x,
                     token_positions=token_positions,
                     rope=rope,
-                    attn_combined_in_projection_out_sharding=attn_combined_in_projection_out_sharding,  # pylint: disable=line-too-long
-                    attn_out_projection_out_sharding=attn_out_projection_out_sharding,
-                    ffn_up_projection_out_sharding=ffn_up_projection_out_sharding,
-                    ffn_down_projection_out_sharding=ffn_down_projection_out_sharding,
                 )
-
-            if use_jit:
-                call = nnx.jit(
-                    call,
-                    static_argnames=[
-                        "attn_combined_in_projection_out_sharding",
-                        "attn_out_projection_out_sharding",
-                        "ffn_up_projection_out_sharding",
-                        "ffn_down_projection_out_sharding",
-                    ],
-                )
+            )
 
             x = jax.device_put(jnp.array(in_embeddings), P("X", None, "Y"))
             y = call(
@@ -716,10 +642,6 @@ class TestLayers:
                 x,
                 rope=rope,
                 token_positions=jnp.arange(in_embeddings.shape[-2]),
-                attn_combined_in_projection_out_sharding=P("X", None, "Y"),
-                attn_out_projection_out_sharding=P("X", None, "Y"),
-                ffn_up_projection_out_sharding=P("X", None, "Y"),
-                ffn_down_projection_out_sharding=P("X", None, "Y"),
             )
             assert y.sharding.spec == P("X", None, "Y")
 
@@ -772,10 +694,6 @@ class TestLayers:
                 x,
                 rope=rope,
                 token_positions=jnp.arange(in_embeddings.shape[-2]),
-                attn_combined_in_projection_out_sharding=P("X", None, "Y"),
-                attn_out_projection_out_sharding=P("X", None, "Y"),
-                ffn_up_projection_out_sharding=P("X", None, "Y"),
-                ffn_down_projection_out_sharding=P("X", None, "Y"),
             )
             numpy_snapshot.assert_match(y, test_name="test_transformer_block")
             assert y.sharding.spec == P("X", None, "Y")
