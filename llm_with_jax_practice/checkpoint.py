@@ -13,7 +13,7 @@ import orbax.checkpoint as ocp
 from flax import nnx
 from jaxtyping import PyTree
 
-from llm_with_jax_practice import _train_config
+from llm_with_jax_practice import train_config as _train_config
 from llm_with_jax_practice import transformer
 
 
@@ -114,34 +114,37 @@ class CheckpointManager:
         self, step: int, abstract_model: nnx.Module, tx: optax.GradientTransformation
     ) -> tuple[nnx.Module, nnx.Optimizer, PyTree[Any]]:
         """Restores the checkpoint."""
-        # 1. Canonicalize abstract model shardings
-        _, model_state = nnx.split(abstract_model)
-        abstract_model_state = _canonicalize_sharding(model_state)
-        nnx.update(abstract_model, abstract_model_state)
-
-        # 2. Create and canonicalize abstract optimizer shardings
+        # 1. Create abstract optimizer on top of abstract model.
+        # Since abstract_model contains ShapeDtypeStructs, no real arrays are allocated here.
         abstract_optimizer = nnx.Optimizer(abstract_model, tx, wrt=nnx.Param)
-        _, optimizer_state = nnx.split(abstract_optimizer)
-        abstract_optimizer_state = _canonicalize_sharding(optimizer_state)
 
-        # 3. Restore using fixed shardings
+        # 2. Split both together to get a unified GraphDef and combined abstract state.
+        # This allows us to restore both in one merge call, ensuring correct linking.
+        # Path 0: optimizer state, Path 1: model state.
+        opt_model_graph_def, abstract_combined_state = nnx.split(
+            (abstract_optimizer, abstract_model)
+        )
+        abstract_combined_state = _canonicalize_sharding(abstract_combined_state)
+
+        # 3. Restore using fixed shardings from their respective checkpoint slots.
         restored_args = self._ocp_checkpoint_manager.restore(
             step=step,
             args=ocp.args.Composite(
-                model_state=ocp.args.StandardRestore(abstract_model_state),
-                optimizer_state=ocp.args.StandardRestore(abstract_optimizer_state),
+                model_state=ocp.args.StandardRestore(abstract_combined_state[1]),
+                optimizer_state=ocp.args.StandardRestore(abstract_combined_state[0]),
                 metadata=ocp.args.JsonRestore(),
             ),
         )
-        graph_def, _ = nnx.split(abstract_model)
-        restored_model = nnx.merge(graph_def, restored_args.model_state)
-        # We can't use the same `nnx.merge` call to restore the optimizer becasue the abstract
-        # optimizer constructed above is linked to the abstract model's state (parameters). The
-        # returned optimizer should be linked to the restored model's state (parameters), so we
-        # need to construct a new optimizer.
-        # TODO(djwenren): what is the implication on sharding and memory footprint?
-        restored_optimizer = nnx.Optimizer(restored_model, tx, wrt=nnx.Param)
-        nnx.update(restored_optimizer, restored_args.optimizer_state)
+
+        # 4. Merge everything back into real objects in one go.
+        # This bypasses optax.init() and prevents materializing zero-filled states.
+        full_restored_state = nnx.State(
+            {0: restored_args.optimizer_state, 1: restored_args.model_state}
+        )
+        restored_optimizer, restored_model = nnx.merge(
+            opt_model_graph_def, full_restored_state
+        )
+
         return restored_model, restored_optimizer, restored_args.metadata
 
     def all_steps(self) -> Sequence[int]:
@@ -164,14 +167,14 @@ class CheckpointManager:
         """Returns the metadata for the checkpoint."""
         return self._ocp_checkpoint_manager.metadata(step=step)
 
-    def train_config(self) -> train_config.TrainConfig | None:
+    def train_config(self) -> _train_config.TrainConfig | None:
         """Returns the configuration for the checkpoint."""
         train_config_dict = self._ocp_checkpoint_manager.metadata().custom_metadata[
             "train_config"
         ]
         if train_config_dict is None:
             return None
-        return train_config.TrainConfig(**train_config_dict)
+        return _train_config.TrainConfig(**train_config_dict)
 
     def model_config(self) -> transformer.TransformerConfig | None:
         """Returns the configuration for the checkpoint."""

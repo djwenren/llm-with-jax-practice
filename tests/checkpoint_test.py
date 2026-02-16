@@ -146,7 +146,6 @@ def test_checkpoint_manager_with_config():
         train_config = _train_config.TrainConfig(
             num_steps=100,
             training_batch_size=128,
-            context_length=16,
             validation_batch_size=128,
         )
         model_config = _transformer.TransformerConfig(
@@ -182,7 +181,6 @@ def test_checkpoint_manager_with_config():
         a_different_config = _train_config.TrainConfig(
             num_steps=200,
             training_batch_size=256,
-            context_length=32,
             validation_batch_size=256,
         )
         a_different_model_config = _transformer.TransformerConfig(
