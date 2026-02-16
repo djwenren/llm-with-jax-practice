@@ -4,14 +4,17 @@ import jax
 
 jax.config.update("jax_num_cpu_devices", 8)
 
-import jax.numpy as jnp
-import pytest
-import einops
+import jax.numpy as jnp  # pylint: disable=wrong-import-position
+import pytest  # pylint: disable=wrong-import-position
+import einops  # pylint: disable=wrong-import-position
 
-from flax import nnx
-from jax.sharding import PartitionSpec as P
+from flax import nnx  # pylint: disable=wrong-import-position
+from jax.sharding import PartitionSpec as P  # pylint: disable=wrong-import-position
 
-from llm_with_jax_practice import layers
+from llm_with_jax_practice import layers  # pylint: disable=wrong-import-position
+from llm_with_jax_practice import (
+    sharding as _sharding,
+)  # pylint: disable=wrong-import-position
 
 
 class TestLayers:
@@ -48,7 +51,7 @@ class TestLayers:
                 in_features=d_model,
                 out_features=d_ff,
                 rngs=nnx.Rngs(jax.random.key(42)),
-                sharding=P(None, "Y"),
+                sharding=_sharding.LinearSharding(weight=P(None, "Y")),
             )
             call = (
                 nnx.jit(lambda model, x: model(x))
@@ -77,8 +80,9 @@ class TestLayers:
                 in_features=d_model,
                 out_features=d_ff,
                 rngs=nnx.Rngs(jax.random.key(42)),
-                sharding=P("Y", None),
-                out_sharding=P("X", None, "Y"),
+                sharding=_sharding.LinearSharding(
+                    weight=P("Y", None), out=P("X", None, "Y")
+                ),
             )
 
             @nnx.jit
@@ -128,8 +132,9 @@ class TestLayers:
                 num_embeddings=vocab_size,
                 embedding_dim=d_model,
                 rngs=nnx.Rngs(jax.random.key(42)),
-                embedding_matrix_sharding=P(None, "Y"),
-                out_sharding=P("X", None, "Y"),
+                sharding=_sharding.EmbeddingSharding(
+                    embedding_matrix=P(None, "Y"), out=P("X", None, "Y")
+                ),
             )
             call = (
                 nnx.jit(lambda model, x: model(x))
@@ -174,8 +179,10 @@ class TestLayers:
             rms_norm = layers.RMSNorm(
                 d_model=d_model,
                 eps=1e-5,
-                weight_sharding=P(
-                    None,
+                sharding=_sharding.RMSNormSharding(
+                    weight=P(
+                        None,
+                    )
                 ),
             )
             call = (
@@ -187,12 +194,7 @@ class TestLayers:
             y = call(rms_norm, x)
             assert y.sharding.spec == P("X", None, None)
 
-            rms_norm.weight = jax.device_put(
-                jnp.array(reference_weights),
-                P(
-                    None,
-                ),
-            )
+            rms_norm.weight = jax.device_put(jnp.array(reference_weights), P(None))
             y = call(rms_norm, x)
             numpy_snapshot.assert_match(y, test_name="test_rmsnorm")
             assert y.sharding.spec == P("X", None, None)
@@ -240,10 +242,14 @@ class TestLayers:
                 d_model=d_model,
                 d_ff=d_ff,
                 rngs=nnx.Rngs(jax.random.key(42)),
-                up_projection_weight_sharding=P("X", "Y"),
-                down_projection_weight_sharding=P("Y", "X"),
-                up_projection_out_sharding=P("X", None, "Y"),
-                down_projection_out_sharding=P("X", None, "Y"),
+                sharding=_sharding.SwiGLUSharding(
+                    up_projection=_sharding.LinearSharding(
+                        weight=P("X", "Y"), out=P("X", None, "Y")
+                    ),
+                    down_projection=_sharding.LinearSharding(
+                        weight=P("Y", "X"), out=P("X", None, "Y")
+                    ),
+                ),
             )
 
             call = (
@@ -331,10 +337,14 @@ class TestLayers:
                 d_model=d_model,
                 num_heads=n_heads,
                 rngs=nnx.Rngs(jax.random.key(42)),
-                combined_in_projection_weight_sharding=P("X", "Y"),
-                out_projection_weight_sharding=P("Y", "X"),
-                combined_in_projection_out_sharding=P("X", None, "Y"),
-                out_projection_out_sharding=P("X", None, "Y"),
+                sharding=_sharding.MultiHeadSelfAttentionSharding(
+                    combined_in_projection=_sharding.LinearSharding(
+                        weight=P("X", "Y"), out=P("X", None, "Y")
+                    ),
+                    out_projection=_sharding.LinearSharding(
+                        weight=P("Y", "X"), out=P("X", None, "Y")
+                    ),
+                ),
             )
 
             call = (
@@ -450,10 +460,14 @@ class TestLayers:
                 d_model=d_model,
                 num_heads=n_heads,
                 rngs=nnx.Rngs(jax.random.key(42)),
-                combined_in_projection_weight_sharding=P("X", "Y"),
-                out_projection_weight_sharding=P("Y", "X"),
-                combined_in_projection_out_sharding=P("X", None, "Y"),
-                out_projection_out_sharding=P("X", None, "Y"),
+                sharding=_sharding.MultiHeadSelfAttentionSharding(
+                    combined_in_projection=_sharding.LinearSharding(
+                        weight=P("X", "Y"), out=P("X", None, "Y")
+                    ),
+                    out_projection=_sharding.LinearSharding(
+                        weight=P("Y", "X"), out=P("X", None, "Y")
+                    ),
+                ),
             )
 
             call = (
@@ -610,14 +624,24 @@ class TestLayers:
                 num_heads=n_heads,
                 d_ff=d_ff,
                 rngs=nnx.Rngs(jax.random.key(42)),
-                attn_combined_in_projection_weight_sharding=P("X", "Y"),
-                attn_out_projection_weight_sharding=P("Y", "X"),
-                ffn_up_projection_weight_sharding=P("X", "Y"),
-                ffn_down_projection_weight_sharding=P("Y", "X"),
-                attn_combined_in_projection_out_sharding=P("X", None, "Y"),
-                attn_out_projection_out_sharding=P("X", None, "Y"),
-                ffn_up_projection_out_sharding=P("X", None, "Y"),
-                ffn_down_projection_out_sharding=P("X", None, "Y"),
+                sharding=_sharding.TransformerBlockSharding(
+                    attn=_sharding.MultiHeadSelfAttentionSharding(
+                        combined_in_projection=_sharding.LinearSharding(
+                            weight=P("X", "Y"), out=P("X", None, "Y")
+                        ),
+                        out_projection=_sharding.LinearSharding(
+                            weight=P("Y", "X"), out=P("X", None, "Y")
+                        ),
+                    ),
+                    ffn=_sharding.SwiGLUSharding(
+                        up_projection=_sharding.LinearSharding(
+                            weight=P("X", "Y"), out=P("X", None, "Y")
+                        ),
+                        down_projection=_sharding.LinearSharding(
+                            weight=P("Y", "X"), out=P("X", None, "Y")
+                        ),
+                    ),
+                ),
             )
 
             call = (

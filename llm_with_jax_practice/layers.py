@@ -12,6 +12,7 @@ from jaxtyping import Float
 from jaxtyping import Int
 
 from llm_with_jax_practice import functions
+from llm_with_jax_practice import sharding as _sharding
 
 
 class Linear(nnx.Module):
@@ -24,8 +25,7 @@ class Linear(nnx.Module):
         rngs: nnx.Rngs,
         *,
         dtype: jnp.dtype = jnp.float32,
-        sharding: P | None = None,
-        out_sharding: P | None = None,
+        sharding: _sharding.LinearSharding = _sharding.LinearSharding(),
     ):
         std = np.sqrt(2.0 / (in_features + out_features))
         self.weight = nnx.Param(
@@ -34,11 +34,11 @@ class Linear(nnx.Module):
                 lower=-3.0 * std,
                 upper=3.0 * std,
                 dtype=dtype,
-                out_sharding=sharding,
+                out_sharding=sharding.weight,
             )
             * std
         )
-        self.out_sharding = out_sharding
+        self.out_sharding = sharding.out
 
     def __call__(
         self,
@@ -60,8 +60,7 @@ class Embedding(nnx.Module):
         rngs: nnx.Rngs,
         *,
         dtype=jnp.float32,
-        embedding_matrix_sharding: P | None = None,
-        out_sharding: P | None = None,
+        sharding: _sharding.EmbeddingSharding = _sharding.EmbeddingSharding(),
     ):
         self.weight = nnx.Param(
             rngs.truncated_normal(
@@ -69,10 +68,10 @@ class Embedding(nnx.Module):
                 lower=-3.0,
                 upper=3.0,
                 dtype=dtype,
-                out_sharding=embedding_matrix_sharding,
+                out_sharding=sharding.embedding_matrix,
             )
         )
-        self.out_sharding = out_sharding
+        self.out_sharding = sharding.out
 
     def __call__(
         self, token_ids: Int[Array, "..."]
@@ -89,11 +88,11 @@ class RMSNorm(nnx.Module):
         eps: float = 1e-6,
         *,
         dtype=jnp.float32,
-        weight_sharding: P | None = None,
+        sharding: _sharding.RMSNormSharding = _sharding.RMSNormSharding(),
     ):
         self.eps = eps
         self.weight = nnx.Param(
-            jnp.ones((d_model,), dtype=dtype, out_sharding=weight_sharding)
+            jnp.ones((d_model,), dtype=dtype, out_sharding=sharding.weight)
         )
 
     def __call__(self, x: Float[Array, "... d_model"]) -> Float[Array, "... d_model"]:
@@ -116,35 +115,29 @@ class SwiGLU(nnx.Module):
         d_ff: int,
         rngs: nnx.Rngs,
         *,
-        up_projection_weight_sharding: P | None = None,
-        down_projection_weight_sharding: P | None = None,
-        up_projection_out_sharding: P | None = None,
-        down_projection_out_sharding: P | None = None,
         dtype=jnp.float32,
+        sharding: _sharding.SwiGLUSharding = _sharding.SwiGLUSharding(),
     ):
         self.w1_projection = Linear(
             in_features=d_model,
             out_features=d_ff,
             rngs=rngs,
             dtype=dtype,
-            sharding=up_projection_weight_sharding,
-            out_sharding=up_projection_out_sharding,
+            sharding=sharding.up_projection,
         )
         self.w3_projection = Linear(
             in_features=d_model,
             out_features=d_ff,
             rngs=rngs,
             dtype=dtype,
-            sharding=up_projection_weight_sharding,
-            out_sharding=up_projection_out_sharding,
+            sharding=sharding.up_projection,
         )
         self.w2_projection = Linear(
             in_features=d_ff,
             out_features=d_model,
             rngs=rngs,
             dtype=dtype,
-            sharding=down_projection_weight_sharding,
-            out_sharding=down_projection_out_sharding,
+            sharding=sharding.down_projection,
         )
 
     def __call__(
@@ -164,16 +157,18 @@ class RoPE(nnx.Module):
         theta: float,
         d_k: int,
         max_seq_len: int,
+        *,
+        dtype: jnp.dtype = jnp.float32,
     ):
         theta_tensor = jnp.arange(max_seq_len)[:, None] / (
             theta ** (2 * jnp.arange(d_k // 2) / d_k)[None, :]
         )
         cosine_matrix = jnp.cos(theta_tensor)[:, :, None, None] * (
             jnp.array([[1.0, 0], [0, 1.0]])[None, None, :, :]
-        )
+        ).astype(dtype)
         sine_matrix = jnp.sin(theta_tensor)[:, :, None, None] * (
             jnp.array([[0, -1.0], [1.0, 0]])[None, None, :, :]
-        )
+        ).astype(dtype)
         # https://gemini.google.com/app/2aad378109c833fe
         self.rope_matrix = nnx.Variable(cosine_matrix + sine_matrix)
 
@@ -212,10 +207,7 @@ class MultiHeadSelfAttention(nnx.Module):
         rngs: nnx.Rngs,
         *,
         dtype: jnp.dtype = jnp.float32,
-        combined_in_projection_weight_sharding: P | None = None,
-        out_projection_weight_sharding: P | None = None,
-        combined_in_projection_out_sharding: P | None = None,
-        out_projection_out_sharding: P | None = None,
+        sharding: _sharding.MultiHeadSelfAttentionSharding = _sharding.MultiHeadSelfAttentionSharding(),  # pylint: disable=line-too-long
     ):
         assert (
             d_model % num_heads
@@ -228,16 +220,14 @@ class MultiHeadSelfAttention(nnx.Module):
             out_features=3 * d_model,
             dtype=dtype,
             rngs=rngs,
-            sharding=combined_in_projection_weight_sharding,
-            out_sharding=combined_in_projection_out_sharding,
+            sharding=sharding.combined_in_projection,
         )
         self.out_projection = Linear(
             in_features=d_model,
             out_features=d_model,
             dtype=dtype,
             rngs=rngs,
-            sharding=out_projection_weight_sharding,
-            out_sharding=out_projection_out_sharding,
+            sharding=sharding.out_projection,
         )
 
     def __call__(
@@ -291,14 +281,7 @@ class TransformerBlock(nnx.Module):
         *,
         dtype: jnp.dtype = jnp.float32,
         eps: float = 1e-5,
-        attn_combined_in_projection_weight_sharding: P | None = None,
-        attn_out_projection_weight_sharding: P | None = None,
-        ffn_up_projection_weight_sharding: P | None = None,
-        ffn_down_projection_weight_sharding: P | None = None,
-        attn_combined_in_projection_out_sharding: P | None = None,
-        attn_out_projection_out_sharding: P | None = None,
-        ffn_up_projection_out_sharding: P | None = None,
-        ffn_down_projection_out_sharding: P | None = None,
+        sharding: _sharding.TransformerBlockSharding = _sharding.TransformerBlockSharding(),
     ):
         self.rms_norm_pre_attn = RMSNorm(d_model=d_model, eps=eps, dtype=dtype)
         self.attn = MultiHeadSelfAttention(
@@ -306,10 +289,7 @@ class TransformerBlock(nnx.Module):
             num_heads=num_heads,
             rngs=rngs,
             dtype=dtype,
-            combined_in_projection_weight_sharding=attn_combined_in_projection_weight_sharding,
-            out_projection_weight_sharding=attn_out_projection_weight_sharding,
-            combined_in_projection_out_sharding=attn_combined_in_projection_out_sharding,
-            out_projection_out_sharding=attn_out_projection_out_sharding,
+            sharding=sharding.attn,
         )
         self.rms_norm_pre_ff = RMSNorm(d_model=d_model, eps=eps, dtype=dtype)
         self.ffn = SwiGLU(
@@ -317,10 +297,7 @@ class TransformerBlock(nnx.Module):
             d_ff=d_ff,
             rngs=rngs,
             dtype=dtype,
-            up_projection_weight_sharding=ffn_up_projection_weight_sharding,
-            down_projection_weight_sharding=ffn_down_projection_weight_sharding,
-            up_projection_out_sharding=ffn_up_projection_out_sharding,
-            down_projection_out_sharding=ffn_down_projection_out_sharding,
+            sharding=sharding.ffn,
         )
 
     def __call__(

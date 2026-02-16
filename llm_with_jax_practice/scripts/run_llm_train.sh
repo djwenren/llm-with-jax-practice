@@ -49,6 +49,7 @@ ROPE_THETA=10000
 D_MODEL=256
 D_FF_TO_D_MODEL=2.6666667
 D_FF=672
+SHARDING_STRATEGY="fsdp_tp"
 
 TRAIN_CMD="uv run llm_with_jax_practice/train_main.py"
 
@@ -83,4 +84,5 @@ ${TRAIN_CMD} \
   --rope_theta="${ROPE_THETA}" \
   --d_model="${D_MODEL}" \
   --d_ff_to_d_model="${D_FF_TO_D_MODEL}" \
-  --d_ff="${D_FF}"
+  --d_ff="${D_FF}" \
+  --sharding_strategy="${SHARDING_STRATEGY}"

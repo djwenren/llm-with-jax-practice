@@ -10,8 +10,10 @@ from absl import flags
 from jaxtyping import Float
 from jaxtyping import Int
 from flax import nnx
+from jax.sharding import PartitionSpec as P
 
 from llm_with_jax_practice import layers as L
+from llm_with_jax_practice import sharding as _sharding
 
 _vocab_size = flags.DEFINE_integer("vocab_size", 1000, "Vocabulary size.")
 _context_length = flags.DEFINE_integer("context_length", 16, "Context length.")
@@ -25,7 +27,7 @@ _d_ff_to_d_model = flags.DEFINE_float(
 _d_ff = flags.DEFINE_integer("d_ff", None, "FF dimension.")
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(kw_only=True, frozen=True)
 class TransformerConfig:
     """Tranformer config."""
 
@@ -63,12 +65,15 @@ class TransformerLm(nnx.Module):
         config: TransformerConfig,
         rngs: nnx.Rngs,
         dtype: jnp.dtype = jnp.float32,
+        *,
+        sharding: _sharding.TransformerLmSharding = _sharding.TransformerLmSharding(),
     ):
         self.token_embeddings = L.Embedding(
             num_embeddings=config.vocab_size,
             embedding_dim=config.d_model,
             rngs=rngs,
             dtype=dtype,
+            sharding=sharding.token_embeddings,
         )
         self.rope = L.RoPE(
             theta=config.rope_theta,
@@ -88,17 +93,21 @@ class TransformerLm(nnx.Module):
                 ),
                 rngs=rngs,
                 dtype=dtype,
+                sharding=sharding.transformer_blocks,
             )
 
         self.transformer_blocks = _create_transformer_block(
             rngs.fork(split=config.num_layers)
         )
-        self.ln_final = L.RMSNorm(d_model=config.d_model, dtype=dtype)
+        self.ln_final = L.RMSNorm(
+            d_model=config.d_model, dtype=dtype, sharding=sharding.ln_final
+        )
         self.lm_head = L.Linear(
             in_features=config.d_model,
             out_features=config.vocab_size,
             rngs=rngs,
             dtype=dtype,
+            sharding=sharding.lm_head,
         )
 
     def __call__(

@@ -4,20 +4,22 @@ import dataclasses
 
 from typing import Sequence
 
-import grain
-import jax
-import numpy as np
-import optax
-import wandb
-
 from absl import app
 from absl import flags
 from absl import logging
+
+import jax
+
+jax.config.update("jax_num_cpu_devices", 8)
+
+import optax
+import wandb
+
 from flax import nnx
 
 from llm_with_jax_practice import checkpoint
-from llm_with_jax_practice import data_loader
 from llm_with_jax_practice import optimizer as _optimizer
+from llm_with_jax_practice import sharding as _sharding
 from llm_with_jax_practice import train_config as _train_config
 from llm_with_jax_practice import train_utils
 from llm_with_jax_practice import transformer
@@ -60,6 +62,20 @@ _log_train_metrics_every_n_steps = flags.DEFINE_integer(
 _validation_every_n_steps = flags.DEFINE_integer(
     "validation_every_n_steps", 10, "Validation every n steps."
 )
+_sharding_strategy = flags.DEFINE_enum(
+    "sharding_strategy", "none", ["none", "fsdp_tp"], "Sharding strategy."
+)
+
+
+def _get_mesh_and_sharding(
+    sharding_strategy: str,
+) -> tuple[jax.sharding.Mesh | None, _sharding.TransformerLmSharding]:
+    """Gets the mesh and sharding."""
+    if sharding_strategy == "fsdp_tp":
+        logging.info("Setting mesh for FSDP + TP sharding.")
+        mesh = jax.make_mesh((4, 2), ("data", "model"))
+        return mesh, _sharding.FSDP_TP_SHARDING
+    return None, _sharding.TransformerLmSharding()
 
 
 def _reconcile_train_config_and_model_config(
@@ -83,6 +99,7 @@ def _reconcile_train_config_and_model_config(
 def _get_model_and_optimizer(
     train_config: _train_config.TrainConfig,
     model_config: transformer.TransformerConfig,
+    sharding: _sharding.TransformerLmSharding,
     ckpt_manager: checkpoint.CheckpointManager,
 ) -> tuple[nnx.Module, nnx.Optimizer]:
     """Gets the model and optimizer."""
@@ -104,13 +121,13 @@ def _get_model_and_optimizer(
     )
     if ckpt_manager.latest_step() is None:
         model = transformer.TransformerLm(
-            config=model_config, rngs=nnx.Rngs(jax.random.key(42))
+            config=model_config, rngs=nnx.Rngs(jax.random.key(42)), sharding=sharding
         )
         optimizer = nnx.Optimizer(model, tx, wrt=nnx.Param)
         return model, optimizer
     abstract_model = nnx.eval_shape(
         lambda: transformer.TransformerLm(
-            config=model_config, rngs=nnx.Rngs(jax.random.key(42))
+            config=model_config, rngs=nnx.Rngs(jax.random.key(42)), sharding=sharding
         )
     )
     latest_step = ckpt_manager.latest_step()
@@ -123,8 +140,10 @@ def _get_model_and_optimizer(
 
 
 def _get_wandb_run(
+    *,
     train_config: _train_config.TrainConfig,
     model_config: transformer.TransformerConfig,
+    sharding_strategy: str,
     wandb_entity: str,
     wandb_project: str,
     wandb_run_name: str,
@@ -134,7 +153,9 @@ def _get_wandb_run(
         entity=wandb_entity,
         project=wandb_project,
         name=wandb_run_name,
-        config=dataclasses.asdict(train_config) | dataclasses.asdict(model_config),
+        config=dataclasses.asdict(train_config)
+        | dataclasses.asdict(model_config)
+        | {"sharding_strategy": sharding_strategy},
     )
 
 
@@ -143,6 +164,10 @@ def main(argv: Sequence[str]) -> None:
     if len(argv) > 1:
         raise app.UsageError("Too many command-line arguments.")
     del argv  # Unused.
+
+    mesh, sharding = _get_mesh_and_sharding(sharding_strategy=_sharding_strategy.value)
+    if mesh is not None:
+        jax.set_mesh(mesh)
 
     train_config = _train_config.get_train_config()
     model_config = transformer.get_transformer_config()
@@ -162,6 +187,7 @@ def main(argv: Sequence[str]) -> None:
     wandb_run = _get_wandb_run(
         train_config=train_config,
         model_config=model_config,
+        sharding_strategy=_sharding_strategy.value,
         wandb_entity=_wandb_entity.value,
         wandb_project=_wandb_project.value,
         wandb_run_name=_wandb_run_name.value,
@@ -170,6 +196,7 @@ def main(argv: Sequence[str]) -> None:
     model, optimizer = _get_model_and_optimizer(
         train_config=train_config,
         model_config=model_config,
+        sharding=sharding,
         ckpt_manager=ckpt_manager,
     )
     training_dataset, validation_dataset = train_utils.get_datasets(
