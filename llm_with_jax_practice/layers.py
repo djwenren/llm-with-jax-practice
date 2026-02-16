@@ -42,14 +42,11 @@ class Linear(nnx.Module):
         self,
         x: Float[Array, "... d_in"],
         *,
-        weight_resharding: P | None = None,
         out_sharding: P | None = None,
     ) -> Float[Array, "... d_out"]:
-        if weight_resharding is not None:
-            weight = jax.reshard(self.weight, weight_resharding)
-        else:
-            weight = self.weight
-        output = jnp.matmul(x, weight, out_sharding=out_sharding)
+        output = jnp.einsum(
+            "...D, DF -> ... F", x, self.weight, out_sharding=out_sharding
+        )
         return output
 
 
@@ -147,27 +144,19 @@ class SwiGLU(nnx.Module):
         self,
         x: Float[Array, "... d_model"],
         *,
-        x_resharding: P | None = None,
-        up_projection_weight_resharding: P | None = None,
         up_projection_out_sharding: P | None = None,
-        down_projection_weight_resharding: P | None = None,
         down_projection_out_sharding: P | None = None,
     ) -> Float[Array, "... d_model"]:
-        if x_resharding is not None:
-            x = jax.reshard(x, x_resharding)
         w1_out = self.w1_projection(
             x,
-            weight_resharding=up_projection_weight_resharding,
             out_sharding=up_projection_out_sharding,
         )
         w3_out = self.w3_projection(
             x,
-            weight_resharding=up_projection_weight_resharding,
             out_sharding=up_projection_out_sharding,
         )
         return self.w2_projection(
             functions.silu(w1_out) * w3_out,
-            weight_resharding=down_projection_weight_resharding,
             out_sharding=down_projection_out_sharding,
         )
 
@@ -226,7 +215,10 @@ class MultiHeadSelfAttention(nnx.Module):
         d_model: int,
         num_heads: int,
         rngs: nnx.Rngs,
+        *,
         dtype: jnp.dtype = jnp.float32,
+        combined_in_projection_weight_sharding: P | None = None,
+        out_projection_weight_sharding: P | None = None,
     ):
         assert (
             d_model % num_heads
@@ -239,12 +231,14 @@ class MultiHeadSelfAttention(nnx.Module):
             out_features=3 * d_model,
             dtype=dtype,
             rngs=rngs,
+            sharding=combined_in_projection_weight_sharding,
         )
         self.out_projection = Linear(
             in_features=d_model,
             out_features=d_model,
             dtype=dtype,
             rngs=rngs,
+            sharding=out_projection_weight_sharding,
         )
 
     def __call__(
@@ -252,8 +246,14 @@ class MultiHeadSelfAttention(nnx.Module):
         in_features: Float[Array, "... seq_len d_model"],
         token_positions: Int[Array, "... seq_len"] | None = None,
         rope: RoPE | None = None,
+        *,
+        combined_in_projection_out_sharding: P | None = None,
+        out_projection_out_sharding: P | None = None,
     ) -> Float[Array, "... seq_len d_model"]:
-        combined_in_projection = self.combined_in_projection(in_features)
+        combined_in_projection = self.combined_in_projection(
+            in_features,
+            out_sharding=combined_in_projection_out_sharding,
+        )
         query, key, value = jnp.split(combined_in_projection, 3, axis=-1)
         query = einops.rearrange(
             query,
@@ -282,7 +282,8 @@ class MultiHeadSelfAttention(nnx.Module):
             einops.rearrange(
                 scaled_dot_product_attention_result,
                 "... num_heads seq_len d_head -> ... seq_len (num_heads d_head)",
-            )
+            ),
+            out_sharding=out_projection_out_sharding,
         )
 
 
@@ -295,28 +296,57 @@ class TransformerBlock(nnx.Module):
         num_heads: int,
         d_ff: int,
         rngs: nnx.Rngs,
-        dtype: jnp.dtype = jnp.float32,
         *,
+        dtype: jnp.dtype = jnp.float32,
         eps: float = 1e-5,
+        attn_combined_in_projection_weight_sharding: P | None = None,
+        attn_out_projection_weight_sharding: P | None = None,
+        ffn_up_projection_weight_sharding: P | None = None,
+        ffn_down_projection_weight_sharding: P | None = None,
     ):
         self.rms_norm_pre_attn = RMSNorm(d_model=d_model, eps=eps, dtype=dtype)
         self.attn = MultiHeadSelfAttention(
-            d_model=d_model, num_heads=num_heads, rngs=rngs, dtype=dtype
+            d_model=d_model,
+            num_heads=num_heads,
+            rngs=rngs,
+            dtype=dtype,
+            combined_in_projection_weight_sharding=attn_combined_in_projection_weight_sharding,
+            out_projection_weight_sharding=attn_out_projection_weight_sharding,
         )
         self.rms_norm_pre_ff = RMSNorm(d_model=d_model, eps=eps, dtype=dtype)
-        self.ffn = SwiGLU(d_model=d_model, d_ff=d_ff, rngs=rngs, dtype=dtype)
+        self.ffn = SwiGLU(
+            d_model=d_model,
+            d_ff=d_ff,
+            rngs=rngs,
+            dtype=dtype,
+            up_projection_weight_sharding=ffn_up_projection_weight_sharding,
+            down_projection_weight_sharding=ffn_down_projection_weight_sharding,
+        )
 
     def __call__(
         self,
         in_features: Float[Array, "... seq_len d_model"],
         token_positions: Int[Array, "... seq_len"],
         rope: RoPE | None = None,
+        *,
+        attn_combined_in_projection_out_sharding: P | None = None,
+        attn_out_projection_out_sharding: P | None = None,
+        ffn_up_projection_out_sharding: P | None = None,
+        ffn_down_projection_out_sharding: P | None = None,
     ) -> Float[Array, "... seq_len d_model"]:
         activation = self.rms_norm_pre_attn(in_features)
         activation = self.attn(
-            in_features=activation, token_positions=token_positions, rope=rope
+            in_features=activation,
+            token_positions=token_positions,
+            rope=rope,
+            combined_in_projection_out_sharding=attn_combined_in_projection_out_sharding,
+            out_projection_out_sharding=attn_out_projection_out_sharding,
         )
         post_attn_block_activation = in_features + activation
         activation = self.rms_norm_pre_ff(post_attn_block_activation)
-        activation = self.ffn(activation)
+        activation = self.ffn(
+            activation,
+            up_projection_out_sharding=ffn_up_projection_out_sharding,
+            down_projection_out_sharding=ffn_down_projection_out_sharding,
+        )
         return post_attn_block_activation + activation
