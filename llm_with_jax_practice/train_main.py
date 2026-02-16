@@ -119,18 +119,25 @@ def _get_model_and_optimizer(
             )
         ),
     )
-    if ckpt_manager.latest_step() is None:
+    latest_step = ckpt_manager.latest_step()
+
+    @nnx.jit
+    def _get_fresh_model_and_optimizer():
         model = transformer.TransformerLm(
             config=model_config, rngs=nnx.Rngs(jax.random.key(42)), sharding=sharding
         )
         optimizer = nnx.Optimizer(model, tx, wrt=nnx.Param)
         return model, optimizer
+
+    if latest_step is None:
+        return _get_fresh_model_and_optimizer()
+
+    # Restoration involves complex file IO, so we do it outside of JIT.
     abstract_model = nnx.eval_shape(
         lambda: transformer.TransformerLm(
             config=model_config, rngs=nnx.Rngs(jax.random.key(42)), sharding=sharding
         )
     )
-    latest_step = ckpt_manager.latest_step()
     model, optimizer, _ = ckpt_manager.restore(
         step=latest_step,
         abstract_model=abstract_model,
