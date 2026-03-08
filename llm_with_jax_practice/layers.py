@@ -7,12 +7,13 @@ import numpy as np
 
 from flax import nnx
 from jax import Array
-from jax.sharding import PartitionSpec as P
 from jaxtyping import Float
 from jaxtyping import Int
 
 from llm_with_jax_practice import functions
 from llm_with_jax_practice import sharding as _sharding
+
+_MultiHeadSelfAttentionSharding = _sharding.MultiHeadSelfAttentionSharding
 
 
 class Linear(nnx.Module):
@@ -207,7 +208,7 @@ class MultiHeadSelfAttention(nnx.Module):
         rngs: nnx.Rngs,
         *,
         dtype: jnp.dtype = jnp.float32,
-        sharding: _sharding.MultiHeadSelfAttentionSharding = _sharding.MultiHeadSelfAttentionSharding(),  # pylint: disable=line-too-long
+        sharding: _MultiHeadSelfAttentionSharding = _MultiHeadSelfAttentionSharding(),
     ):
         assert (
             d_model % num_heads

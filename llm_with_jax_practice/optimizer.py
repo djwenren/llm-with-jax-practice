@@ -191,10 +191,7 @@ def cosine_onecycle_schedule(
                 step <= cosine_cycle_iters + warmup_iters,
                 min_learning_rate
                 + (max_learning_rate - min_learning_rate)
-                * (
-                    jnp.cos(jnp.pi * (step - warmup_iters) / cosine_cycle_iters)
-                    + 1
-                )
+                * (jnp.cos(jnp.pi * (step - warmup_iters) / cosine_cycle_iters) + 1)
                 / 2,
                 min_learning_rate,
             ),
