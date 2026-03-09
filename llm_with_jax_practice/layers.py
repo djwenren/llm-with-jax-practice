@@ -37,7 +37,7 @@ class Linear(nnx.Module):
                 dtype=dtype,
                 out_sharding=sharding.weight,
             )
-            * std
+            * jnp.array(std, dtype=dtype)
         )
         self.out_sharding = sharding.out
 
@@ -161,9 +161,9 @@ class RoPE(nnx.Module):
         *,
         dtype: jnp.dtype = jnp.float32,
     ):
-        theta_tensor = jnp.arange(max_seq_len)[:, None] / (
+        theta_tensor = (jnp.arange(max_seq_len)[:, None] / (
             theta ** (2 * jnp.arange(d_k // 2) / d_k)[None, :]
-        )
+        )).astype(dtype)
         cosine_matrix = jnp.cos(theta_tensor)[:, :, None, None] * (
             jnp.array([[1.0, 0], [0, 1.0]])[None, None, :, :]
         ).astype(dtype)
