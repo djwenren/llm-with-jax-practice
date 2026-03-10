@@ -292,8 +292,16 @@ class TestLayers:
         numpy_snapshot.assert_match(y, test_name="test_rope")
 
     @pytest.mark.parametrize("use_jit", [False, True])
+    @pytest.mark.parametrize("attention_type", ["custom", "xla"])
     def test_multihead_self_attention(
-        self, use_jit, numpy_snapshot, in_embeddings, d_model, n_heads, ts_state_dict
+        self,
+        use_jit,
+        attention_type,
+        numpy_snapshot,
+        in_embeddings,
+        d_model,
+        n_heads,
+        ts_state_dict,
     ):
         """Test Multi-head self-attention layer."""
         d, _ = ts_state_dict
@@ -301,7 +309,10 @@ class TestLayers:
             d[f"layers.0.attn.{k}_proj.weight"] for k in ["q", "k", "v", "output"]
         ]
         multi_head_self_attention = layers.MultiHeadSelfAttention(
-            d_model=d_model, num_heads=n_heads, rngs=nnx.Rngs(jax.random.key(42))
+            d_model=d_model,
+            num_heads=n_heads,
+            rngs=nnx.Rngs(jax.random.key(42)),
+            attention_type=attention_type,
         )
         multi_head_self_attention.combined_in_projection.weight = jnp.concatenate(
             [
@@ -323,8 +334,16 @@ class TestLayers:
         numpy_snapshot.assert_match(y, test_name="test_multihead_self_attention")
 
     @pytest.mark.parametrize("use_jit", [False, True])
+    @pytest.mark.parametrize("attention_type", ["custom", "xla"])
     def test_multihead_self_attention_sharding(
-        self, use_jit, numpy_snapshot, ts_state_dict, in_embeddings, d_model, n_heads
+        self,
+        use_jit,
+        attention_type,
+        numpy_snapshot,
+        ts_state_dict,
+        in_embeddings,
+        d_model,
+        n_heads,
     ):
         """Test Multi-head self-attention layer with FSDP + TP sharding."""
         d, _ = ts_state_dict
@@ -337,6 +356,7 @@ class TestLayers:
                 d_model=d_model,
                 num_heads=n_heads,
                 rngs=nnx.Rngs(jax.random.key(42)),
+                attention_type=attention_type,
                 sharding=_sharding.MultiHeadSelfAttentionSharding(
                     combined_in_projection=_sharding.LinearSharding(
                         weight=P("X", "Y"), out=P("X", None, "Y")
@@ -378,9 +398,11 @@ class TestLayers:
             assert y.sharding.spec == P("X", None, "Y")
 
     @pytest.mark.parametrize("use_jit", [False, True])
+    @pytest.mark.parametrize("attention_type", ["custom", "xla"])
     def test_multihead_self_attention_with_rope(
         self,
         use_jit,
+        attention_type,
         numpy_snapshot,
         in_embeddings,
         d_model,
@@ -398,7 +420,10 @@ class TestLayers:
         pos_ids = einops.rearrange(jnp.array(pos_ids), "seq -> 1 seq")
         rope = layers.RoPE(theta=theta, d_k=d_model // n_heads, max_seq_len=n_keys)
         multi_head_self_attention = layers.MultiHeadSelfAttention(
-            d_model=d_model, num_heads=n_heads, rngs=nnx.Rngs(jax.random.key(42))
+            d_model=d_model,
+            num_heads=n_heads,
+            rngs=nnx.Rngs(jax.random.key(42)),
+            attention_type=attention_type,
         )
         multi_head_self_attention.combined_in_projection.weight = jnp.concatenate(
             [
@@ -435,9 +460,11 @@ class TestLayers:
         )
 
     @pytest.mark.parametrize("use_jit", [False, True])
+    @pytest.mark.parametrize("attention_type", ["custom", "xla"])
     def test_multihead_self_attention_with_rope_sharding(
         self,
         use_jit,
+        attention_type,
         numpy_snapshot,
         in_embeddings,
         d_model,
@@ -460,6 +487,7 @@ class TestLayers:
                 d_model=d_model,
                 num_heads=n_heads,
                 rngs=nnx.Rngs(jax.random.key(42)),
+                attention_type=attention_type,
                 sharding=_sharding.MultiHeadSelfAttentionSharding(
                     combined_in_projection=_sharding.LinearSharding(
                         weight=P("X", "Y"), out=P("X", None, "Y")

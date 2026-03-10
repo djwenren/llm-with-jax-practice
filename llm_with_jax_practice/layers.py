@@ -1,5 +1,8 @@
 """Layers for LLM with JAX Practice."""
 
+from turtle import position
+from typing import Literal
+
 import einops
 import jax
 import jax.numpy as jnp
@@ -7,6 +10,7 @@ import numpy as np
 
 from flax import nnx
 from jax import Array
+from jaxtyping import Bool
 from jaxtyping import Float
 from jaxtyping import Int
 
@@ -161,9 +165,10 @@ class RoPE(nnx.Module):
         *,
         dtype: jnp.dtype = jnp.float32,
     ):
-        theta_tensor = (jnp.arange(max_seq_len)[:, None] / (
-            theta ** (2 * jnp.arange(d_k // 2) / d_k)[None, :]
-        )).astype(dtype)
+        theta_tensor = (
+            jnp.arange(max_seq_len)[:, None]
+            / (theta ** (2 * jnp.arange(d_k // 2) / d_k)[None, :])
+        ).astype(dtype)
         cosine_matrix = jnp.cos(theta_tensor)[:, :, None, None] * (
             jnp.array([[1.0, 0], [0, 1.0]])[None, None, :, :]
         ).astype(dtype)
@@ -171,31 +176,32 @@ class RoPE(nnx.Module):
             jnp.array([[0, -1.0], [1.0, 0]])[None, None, :, :]
         ).astype(dtype)
         # https://gemini.google.com/app/2aad378109c833fe
+        # Shape: (max_seq_len, half_d_k, 2, 2)
         self.rope_matrix = nnx.Variable(cosine_matrix + sine_matrix)
 
     def __call__(
         self,
-        x: Float[Array, "... seq_len d_k"],
-        token_positions: Int[Array, "... seq_len"],
-    ) -> Float[Array, "... seq_len d_k"]:
-        position_embeddings: Float[Array, "... seq_len half_d_k r_out r_in"] = (
-            self.rope_matrix[token_positions]
-        )
+        x: Float[Array, "... d_k"],
+        token_positions: Int[Array, "..."],
+    ) -> Float[Array, "... d_k"]:
+        position_embeddings: Float[Array, "... half_d_k r_out r_in"] = self.rope_matrix[
+            token_positions
+        ]
         x_rearranged = einops.rearrange(
-            x, "... seq_len (half_d_k r_in) -> ... seq_len half_d_k r_in", r_in=2
+            x, "... (half_d_k r_in) -> ... half_d_k r_in", r_in=2
         )
         output = einops.einsum(
             x_rearranged,
             position_embeddings,
-            (
-                "... seq_len half_d_k r_in, ... seq_len half_d_k r_out r_in -> "
-                "... seq_len half_d_k r_out"
-            ),
+            ("... half_d_k r_in, ... half_d_k r_out r_in -> " "... half_d_k r_out"),
         )
         return einops.rearrange(
             output,
-            "... seq_len half_d_k r_out -> ... seq_len (half_d_k r_out)",
+            "... half_d_k r_out -> ... (half_d_k r_out)",
         )
+
+
+_ALLOWED_ATTENTION_TYPES = {"custom", "xla", "cudnn"}
 
 
 class MultiHeadSelfAttention(nnx.Module):
@@ -207,12 +213,18 @@ class MultiHeadSelfAttention(nnx.Module):
         num_heads: int,
         rngs: nnx.Rngs,
         *,
+        attention_type: Literal["custom", "xla", "cudnn"] = "custom",
         dtype: jnp.dtype = jnp.float32,
         sharding: _MultiHeadSelfAttentionSharding = _MultiHeadSelfAttentionSharding(),
     ):
         assert (
             d_model % num_heads
         ) == 0, f"d_model {d_model} must be divisible by num_heads {num_heads}."
+        assert attention_type in _ALLOWED_ATTENTION_TYPES, (
+            f"Invalid attention type: {attention_type}. Allowed types are: "
+            f"{_ALLOWED_ATTENTION_TYPES}."
+        )
+        self.attention_type = attention_type
         d_head = d_model // num_heads
         self.num_heads = num_heads
         self.d_head = d_head
@@ -239,6 +251,33 @@ class MultiHeadSelfAttention(nnx.Module):
     ) -> Float[Array, "... seq_len d_model"]:
         combined_in_projection = self.combined_in_projection(in_features)
         query, key, value = jnp.split(combined_in_projection, 3, axis=-1)
+        if self.attention_type == "custom":
+            scaled_dot_product_attention_result = self._call_custom_attention(
+                query=query,
+                key=key,
+                value=value,
+                token_positions=token_positions,
+                rope=rope,
+            )
+        else:
+            scaled_dot_product_attention_result = self._call_jax_attention(
+                query=query,
+                key=key,
+                value=value,
+                token_positions=token_positions,
+                rope=rope,
+            )
+        return self.out_projection(scaled_dot_product_attention_result)
+
+    def _call_custom_attention(
+        self,
+        *,
+        query: Float[Array, "... seq_len d_model"],
+        key: Float[Array, "... seq_len d_model"],
+        value: Float[Array, "... seq_len d_model"],
+        token_positions: Int[Array, "... seq_len"] | None = None,
+        rope: RoPE | None = None,
+    ) -> Float[Array, "... seq_len d_model"]:
         query = einops.rearrange(
             query,
             "... seq_len (num_heads d_head) -> ... num_heads seq_len d_head",
@@ -262,11 +301,52 @@ class MultiHeadSelfAttention(nnx.Module):
         scaled_dot_product_attention_result = functions.scaled_dot_product_attention(
             q=query, k=key, v=value, mask=mask
         )
-        return self.out_projection(
-            einops.rearrange(
-                scaled_dot_product_attention_result,
-                "... num_heads seq_len d_head -> ... seq_len (num_heads d_head)",
-            )
+        return einops.rearrange(
+            scaled_dot_product_attention_result,
+            "... num_heads seq_len d_head -> ... seq_len (num_heads d_head)",
+        )
+
+    def _call_jax_attention(
+        self,
+        *,
+        query: Float[Array, "... seq_len d_model"],
+        key: Float[Array, "... seq_len d_model"],
+        value: Float[Array, "... seq_len d_model"],
+        token_positions: Int[Array, "... seq_len"] | None = None,
+        rope: RoPE | None = None,
+    ) -> Float[Array, "... seq_len d_model"]:
+        query = einops.rearrange(
+            query,
+            "... seq_len (num_heads d_head) -> ... seq_len num_heads  d_head",
+            num_heads=self.num_heads,
+        )
+        key = einops.rearrange(
+            key,
+            "... seq_len (num_heads d_head) -> ... seq_len num_heads d_head",
+            num_heads=self.num_heads,
+        )
+        value = einops.rearrange(
+            value,
+            "... seq_len (num_heads d_head) -> ... seq_len num_heads d_head",
+            num_heads=self.num_heads,
+        )
+        if rope is not None and token_positions is not None:
+            # When using JAX's attention implementation, the head dimension is after the sequence
+            # lenght dimension, so we need to add a singleton dimension to the token positions, so
+            # that it broadcasts correctly.
+            token_positions = token_positions[..., None]
+            query = rope(query, token_positions)
+            key = rope(key, token_positions)
+        scaled_dot_product_attention_result = jax.nn.dot_product_attention(
+            query=query,
+            key=key,
+            value=value,
+            is_causal=True,
+            implementation=self.attention_type,
+        )
+        return einops.rearrange(
+            scaled_dot_product_attention_result,
+            "... seq_len num_heads d_head -> ... seq_len (num_heads d_head)",
         )
 
 

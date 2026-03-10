@@ -139,16 +139,22 @@ class TestMemAndFlopsCounters:
         num_heads = 4
         d_ff = 32
         dtype = jnp.float16
-        mem_and_flops_counter = mem_and_flops_counters.TransformerBlockMemAndFlopsCounter(
-            d_model, num_heads, d_ff, dtype=dtype
+        mem_and_flops_counter = (
+            mem_and_flops_counters.TransformerBlockMemAndFlopsCounter(
+                d_model, num_heads, d_ff, dtype=dtype
+            )
         )
         B, T, D = 2, 8, d_model
         x = jax.ShapeDtypeStruct(shape=(B, T, D), dtype=jnp.float32)
         token_positions = jax.ShapeDtypeStruct(shape=(B, T), dtype=jnp.int32)
-        results = mem_and_flops_counter.count(x, token_positions, is_training=is_training)
+        results = mem_and_flops_counter.count(
+            x, token_positions, is_training=is_training
+        )
 
         # rms_norm_pre_attn: D, attn: D*3D + D*D, rms_norm_pre_ff: D, ffn: 3*D*D_ff
-        expected_num_params = d_model + (3 * d_model**2 + d_model**2) + d_model + (3 * d_model * d_ff)
+        expected_num_params = (
+            d_model + (3 * d_model**2 + d_model**2) + d_model + (3 * d_model * d_ff)
+        )
         assert results.num_trainable_params == expected_num_params
         assert results.num_non_trainable_params == 0
         assert results.state_bytes == expected_num_params * 2
@@ -160,7 +166,9 @@ class TestMemAndFlopsCounters:
             assert results.optimizer_param_bytes == 0
 
         # RMSNorm1: B*T*D, MHSA: B*T*(5D + T*H), RMSNorm2: B*T*D, SwiGLU: B*T*(2*D_ff + D)
-        expected_num_activation_params = B * T * (8 * d_model + T * num_heads + 2 * d_ff)
+        expected_num_activation_params = (
+            B * T * (8 * d_model + T * num_heads + 2 * d_ff)
+        )
         assert results.num_activation_params == expected_num_activation_params
         assert results.activation_bytes == expected_num_activation_params * 4
 
@@ -173,6 +181,7 @@ class TestMemAndFlopsCounters:
     def test_transformer_lm(self, is_training):
         """Test Transformer language model mem and flops counter."""
         from llm_with_jax_practice import transformer
+
         config = transformer.TransformerConfig(
             vocab_size=100,
             context_length=16,
@@ -191,34 +200,50 @@ class TestMemAndFlopsCounters:
         results = mem_and_flops_counter.count(input_tokens, is_training=is_training)
 
         # TransformerBlock params: 2*D (RMSNorms) + (4*D^2) (MHSA) + (3*D*D_ff) (SwiGLU)
-        block_params = 2 * config.d_model + (4 * config.d_model**2) + (3 * config.d_model * config.d_ff)
+        block_params = (
+            2 * config.d_model
+            + (4 * config.d_model**2)
+            + (3 * config.d_model * config.d_ff)
+        )
 
         expected_num_trainable_params = (
-            config.vocab_size * config.d_model # token_embeddings
-            + config.num_layers * block_params # transformer_blocks
-            + config.d_model # ln_final
-            + config.d_model * config.vocab_size # lm_head
+            config.vocab_size * config.d_model  # token_embeddings
+            + config.num_layers * block_params  # transformer_blocks
+            + config.d_model  # ln_final
+            + config.d_model * config.vocab_size  # lm_head
         )
         assert results.num_trainable_params == expected_num_trainable_params
-        
+
         # RoPE params are context_length * (D/num_heads/2) * 2 * 2 = 16 * (32/4/2) * 2 * 2 = 256.
-        # But wait, RoPE is float32 by default in my implementation? 
+        # But wait, RoPE is float32 by default in my implementation?
         # I fixed it to use dtype. So 256 params.
-        expected_num_non_trainable_params = 256 
+        expected_num_non_trainable_params = 256
         assert results.num_non_trainable_params == expected_num_non_trainable_params
-        
-        assert results.state_bytes == (expected_num_trainable_params + expected_num_non_trainable_params) * 2
-        
+
+        assert (
+            results.state_bytes
+            == (expected_num_trainable_params + expected_num_non_trainable_params) * 2
+        )
+
         if is_training:
             assert results.optimizer_num_params == expected_num_trainable_params * 2
-            assert results.optimizer_param_bytes == expected_num_trainable_params * 2 * 2
+            assert (
+                results.optimizer_param_bytes == expected_num_trainable_params * 2 * 2
+            )
         else:
             assert results.optimizer_num_params == 0
             assert results.optimizer_param_bytes == 0
 
         # Total LM: B*T*D (Embed) + L * B*T*(9*D + T*H + 2*D_ff) + B*T*D (LN) + B*T*V (LM Head)
-        expected_num_activation_params = B * T * (
-            2 * config.d_model + config.vocab_size + config.num_layers * (9 * config.d_model + T * config.num_heads + 2 * config.d_ff)
+        expected_num_activation_params = (
+            B
+            * T
+            * (
+                2 * config.d_model
+                + config.vocab_size
+                + config.num_layers
+                * (9 * config.d_model + T * config.num_heads + 2 * config.d_ff)
+            )
         )
         assert results.num_activation_params == expected_num_activation_params
         # Since dtype=jnp.float16, activations should use 2 bytes per param.
@@ -227,6 +252,13 @@ class TestMemAndFlopsCounters:
         # Block flops: B*T*(8*D^2 + 4*T*D + 6*D*D_ff)
         # LM Head: 2*D*V * B*T
         # Total: B*T * (L * (8*D^2 + 4*T*D + 6*D*D_ff) + 2*D*V)
-        D, V, L, H = config.d_model, config.vocab_size, config.num_layers, config.num_heads
-        flops_per_pass = B * T * (L * (8 * D**2 + 4 * T * D + 6 * D * config.d_ff) + 2 * D * V)
+        D, V, L, H = (
+            config.d_model,
+            config.vocab_size,
+            config.num_layers,
+            config.num_heads,
+        )
+        flops_per_pass = (
+            B * T * (L * (8 * D**2 + 4 * T * D + 6 * D * config.d_ff) + 2 * D * V)
+        )
         assert results.flops == flops_per_pass * (3 if is_training else 1)
