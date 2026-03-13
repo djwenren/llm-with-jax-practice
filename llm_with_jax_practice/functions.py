@@ -28,6 +28,7 @@ def scaled_dot_product_attention(
     k: Float[jnp.ndarray, "... keys_len d_k"],
     v: Float[jnp.ndarray, "... keys_len d_v"],
     mask: Bool[jnp.ndarray, "... queries_len keys_len"] | None = None,
+    attention_normalizer: float | None = None,
 ) -> Float[jnp.ndarray, "... queries_len values_len"]:
     """Scaled dot-product attention.
 
@@ -41,10 +42,13 @@ def scaled_dot_product_attention(
     Returns:
         Float[jnp.ndarray, "... queries_len values_len"]: Output tensor.
     """
-    d_k = q.shape[-1]
-    scaled_dot_product = einops.einsum(
-        q, k, "... queries_len d_k, ... keys_len d_k -> ... queries_len keys_len"
-    ) / np.sqrt(d_k)
+    attention_normalizer = attention_normalizer or 1.0 / np.sqrt(q.shape[-1])
+    scaled_dot_product = (
+        einops.einsum(
+            q, k, "... queries_len d_k, ... keys_len d_k -> ... queries_len keys_len"
+        )
+        * attention_normalizer
+    )
     if mask is not None:
         scaled_dot_product = jnp.where(mask, scaled_dot_product, -jnp.inf)
     return einops.einsum(

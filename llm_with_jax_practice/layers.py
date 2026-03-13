@@ -1,11 +1,12 @@
 """Layers for LLM with JAX Practice."""
 
+import math
+
 from typing import Literal
 
 import einops
 import jax
 import jax.numpy as jnp
-import numpy as np
 
 from flax import nnx
 from jax import Array
@@ -30,8 +31,9 @@ class Linear(nnx.Module):
         dtype: jnp.dtype = jnp.float32,
         sharding: _sharding.LinearSharding = _sharding.LinearSharding(),
         std: float | None = None,
+        alpha: float | None = None,
     ):
-        std = std or np.sqrt(2.0 / (in_features + out_features))
+        std = std or math.sqrt(2.0 / (in_features + out_features))
         self.weight = nnx.Param(
             rngs.truncated_normal(
                 shape=(in_features, out_features),
@@ -43,13 +45,17 @@ class Linear(nnx.Module):
             * jnp.array(std, dtype=dtype)
         )
         self.out_sharding = sharding.out
+        self.alpha = jnp.array(alpha or 1.0, dtype=dtype)
 
     def __call__(
         self,
         x: Float[Array, "... d_in"],
     ) -> Float[Array, "... d_out"]:
-        output = jnp.einsum(
-            "...D, DF -> ... F", x, self.weight, out_sharding=self.out_sharding
+        output = (
+            jnp.einsum(
+                "...D, DF -> ... F", x, self.weight, out_sharding=self.out_sharding
+            )
+            * self.alpha
         )
         return output
 
@@ -66,7 +72,7 @@ class Embedding(nnx.Module):
         dtype=jnp.float32,
         sharding: _sharding.EmbeddingSharding = _sharding.EmbeddingSharding(),
         std: float | None = None,
-        alpha_input: float | None = None,
+        alpha: float | None = None,
     ):
         std = std or 1.0
         self.weight = nnx.Param(
@@ -80,14 +86,13 @@ class Embedding(nnx.Module):
             * jnp.array(std, dtype=dtype)
         )
         self.out_sharding = sharding.out
-        self.alpha_input = jnp.array(alpha_input or 1.0, dtype=dtype)
+        self.alpha = jnp.array(alpha or 1.0, dtype=dtype)
 
     def __call__(
         self, token_ids: Int[Array, "..."]
     ) -> Float[Array, "... embedding_dim"]:
         return (
-            self.weight.at[token_ids].get(out_sharding=self.out_sharding)
-            * self.alpha_input
+            self.weight.at[token_ids].get(out_sharding=self.out_sharding) * self.alpha
         )
 
 
@@ -227,6 +232,7 @@ class MultiHeadSelfAttention(nnx.Module):
         attention_type: Literal["custom", "xla", "cudnn"] = "custom",
         dtype: jnp.dtype = jnp.float32,
         sharding: _MultiHeadSelfAttentionSharding = _MultiHeadSelfAttentionSharding(),
+        use_mu_p: bool = False,
         std: float | None = None,
     ):
         assert (
@@ -240,6 +246,14 @@ class MultiHeadSelfAttention(nnx.Module):
         d_head = d_model // num_heads
         self.num_heads = num_heads
         self.d_head = d_head
+        # Set parameterization scheme,
+        self.use_mu_p = use_mu_p
+        if self.use_mu_p:
+            assert std is not None, "std must be set when use_mu_p is True."
+            self.attention_normalizer = 1.0 / self.d_head
+        else:
+            self.attention_normalizer = 1.0 / math.sqrt(d_head)
+        # Initialize combined in-projection and out-projection layers.
         self.combined_in_projection = Linear(
             in_features=d_model,
             out_features=3 * d_model,
@@ -316,7 +330,11 @@ class MultiHeadSelfAttention(nnx.Module):
         seq_len = query.shape[-2]
         mask = jnp.tril(jnp.ones((seq_len, seq_len), dtype=jnp.bool))
         scaled_dot_product_attention_result = functions.scaled_dot_product_attention(
-            q=query, k=key, v=value, mask=mask
+            q=query,
+            k=key,
+            v=value,
+            mask=mask,
+            attention_normalizer=self.attention_normalizer,
         )
         return einops.rearrange(
             scaled_dot_product_attention_result,
@@ -360,6 +378,7 @@ class MultiHeadSelfAttention(nnx.Module):
             value=value,
             is_causal=True,
             implementation=self.attention_type,
+            scale=self.attention_normalizer,
         )
         return einops.rearrange(
             scaled_dot_product_attention_result,
@@ -380,9 +399,14 @@ class TransformerBlock(nnx.Module):
         dtype: jnp.dtype = jnp.float32,
         eps: float = 1e-5,
         sharding: _sharding.TransformerBlockSharding = _sharding.TransformerBlockSharding(),
+        use_mu_p: bool = False,
         attn_std: float | None = None,
         ffn_std: float | None = None,
     ):
+        if use_mu_p:
+            assert attn_std is not None, "attn_std must be set when use_mu_p is True."
+            assert ffn_std is not None, "ffn_std must be set when use_mu_p is True."
+
         self.rms_norm_pre_attn = RMSNorm(d_model=d_model, eps=eps, dtype=dtype)
         self.attn = MultiHeadSelfAttention(
             d_model=d_model,
@@ -390,6 +414,7 @@ class TransformerBlock(nnx.Module):
             rngs=rngs,
             dtype=dtype,
             sharding=sharding.attn,
+            use_mu_p=use_mu_p,
             std=attn_std,
         )
         self.rms_norm_pre_ff = RMSNorm(d_model=d_model, eps=eps, dtype=dtype)
