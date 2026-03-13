@@ -1,6 +1,5 @@
 """Layers for LLM with JAX Practice."""
 
-from turtle import position
 from typing import Literal
 
 import einops
@@ -10,7 +9,6 @@ import numpy as np
 
 from flax import nnx
 from jax import Array
-from jaxtyping import Bool
 from jaxtyping import Float
 from jaxtyping import Int
 
@@ -31,8 +29,9 @@ class Linear(nnx.Module):
         *,
         dtype: jnp.dtype = jnp.float32,
         sharding: _sharding.LinearSharding = _sharding.LinearSharding(),
+        std: float | None = None,
     ):
-        std = np.sqrt(2.0 / (in_features + out_features))
+        std = std or np.sqrt(2.0 / (in_features + out_features))
         self.weight = nnx.Param(
             rngs.truncated_normal(
                 shape=(in_features, out_features),
@@ -66,22 +65,30 @@ class Embedding(nnx.Module):
         *,
         dtype=jnp.float32,
         sharding: _sharding.EmbeddingSharding = _sharding.EmbeddingSharding(),
+        std: float | None = None,
+        alpha_input: float | None = None,
     ):
+        std = std or 1.0
         self.weight = nnx.Param(
             rngs.truncated_normal(
                 shape=(num_embeddings, embedding_dim),
-                lower=-3.0,
-                upper=3.0,
+                lower=-3.0 * std,
+                upper=3.0 * std,
                 dtype=dtype,
                 out_sharding=sharding.embedding_matrix,
             )
+            * jnp.array(std, dtype=dtype)
         )
         self.out_sharding = sharding.out
+        self.alpha_input = jnp.array(alpha_input or 1.0, dtype=dtype)
 
     def __call__(
         self, token_ids: Int[Array, "..."]
     ) -> Float[Array, "... embedding_dim"]:
-        return self.weight.at[token_ids].get(out_sharding=self.out_sharding)
+        return (
+            self.weight.at[token_ids].get(out_sharding=self.out_sharding)
+            * self.alpha_input
+        )
 
 
 class RMSNorm(nnx.Module):
@@ -122,6 +129,7 @@ class SwiGLU(nnx.Module):
         *,
         dtype=jnp.float32,
         sharding: _sharding.SwiGLUSharding = _sharding.SwiGLUSharding(),
+        std: float | None = None,
     ):
         self.w1_projection = Linear(
             in_features=d_model,
@@ -129,6 +137,7 @@ class SwiGLU(nnx.Module):
             rngs=rngs,
             dtype=dtype,
             sharding=sharding.up_projection,
+            std=std,
         )
         self.w3_projection = Linear(
             in_features=d_model,
@@ -136,6 +145,7 @@ class SwiGLU(nnx.Module):
             rngs=rngs,
             dtype=dtype,
             sharding=sharding.up_projection,
+            std=std,
         )
         self.w2_projection = Linear(
             in_features=d_ff,
@@ -143,6 +153,7 @@ class SwiGLU(nnx.Module):
             rngs=rngs,
             dtype=dtype,
             sharding=sharding.down_projection,
+            std=std,
         )
 
     def __call__(
@@ -216,6 +227,7 @@ class MultiHeadSelfAttention(nnx.Module):
         attention_type: Literal["custom", "xla", "cudnn"] = "custom",
         dtype: jnp.dtype = jnp.float32,
         sharding: _MultiHeadSelfAttentionSharding = _MultiHeadSelfAttentionSharding(),
+        std: float | None = None,
     ):
         assert (
             d_model % num_heads
@@ -234,6 +246,10 @@ class MultiHeadSelfAttention(nnx.Module):
             dtype=dtype,
             rngs=rngs,
             sharding=sharding.combined_in_projection,
+            # The elements of the combined in-projection matrix should still be initialized with the
+            # same variance as the individual Q, K, V projection matrices. So even though the size
+            # of the combined in-projection matrix is 3x larger, we still use the same std.
+            std=std,
         )
         self.out_projection = Linear(
             in_features=d_model,
@@ -241,6 +257,7 @@ class MultiHeadSelfAttention(nnx.Module):
             dtype=dtype,
             rngs=rngs,
             sharding=sharding.out_projection,
+            std=std,
         )
 
     def __call__(
@@ -363,6 +380,8 @@ class TransformerBlock(nnx.Module):
         dtype: jnp.dtype = jnp.float32,
         eps: float = 1e-5,
         sharding: _sharding.TransformerBlockSharding = _sharding.TransformerBlockSharding(),
+        attn_std: float | None = None,
+        ffn_std: float | None = None,
     ):
         self.rms_norm_pre_attn = RMSNorm(d_model=d_model, eps=eps, dtype=dtype)
         self.attn = MultiHeadSelfAttention(
@@ -371,6 +390,7 @@ class TransformerBlock(nnx.Module):
             rngs=rngs,
             dtype=dtype,
             sharding=sharding.attn,
+            std=attn_std,
         )
         self.rms_norm_pre_ff = RMSNorm(d_model=d_model, eps=eps, dtype=dtype)
         self.ffn = SwiGLU(
@@ -379,6 +399,7 @@ class TransformerBlock(nnx.Module):
             rngs=rngs,
             dtype=dtype,
             sharding=sharding.ffn,
+            std=ffn_std,
         )
 
     def __call__(
