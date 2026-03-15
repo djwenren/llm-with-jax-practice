@@ -172,10 +172,13 @@ class TransformerLm(nnx.Module):
             d_k=config.d_model // config.num_heads,
             max_seq_len=config.context_length,
         )
-        # Motivated by He/Xavier initialization, where the standard deviation of the weights is
+        # TODO(djwenren): try adding a ratio between attn_std and ffn_std. This is motivated by
+        # He/Xavier initialization, where the standard deviation of the weights is
         # sqrt(2.0 / (in_features + out_features)), we set the standard deviation of the weights in
         # the FFN to sqrt(1.0 / (1.0 + d_ff_to_d_model)).
-        ffn_std_base = config.std_base * math.sqrt(1.0 / (1.0 + config.d_ff_to_d_model))
+        # The ratio between attn_std and ffn_std might not be that important, because the important
+        # thing is that they scale the same way with the m_p factor.
+        ffn_std_base = config.std_base
 
         @nnx.vmap(transform_metadata={nnx.PARTITION_NAME: None}, in_axes=(0,))
         def _create_transformer_block(rngs: nnx.Rngs) -> L.TransformerBlock:
