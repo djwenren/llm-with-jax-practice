@@ -174,8 +174,9 @@ class TransformerLm(nnx.Module):
         )
         # TODO(djwenren): try adding a ratio between attn_std and ffn_std. This is motivated by
         # He/Xavier initialization, where the standard deviation of the weights is
-        # sqrt(2.0 / (in_features + out_features)), we set the standard deviation of the weights in
-        # the FFN to sqrt(1.0 / (1.0 + d_ff_to_d_model)).
+        # sqrt(2.0 / (in_features + out_features)). Because of this we can set the standard
+        # deviation of the weights in the FFN to sqrt(1.0 / (1.0 + d_ff_to_d_model)).
+        #
         # The ratio between attn_std and ffn_std might not be that important, because the important
         # thing is that they scale the same way with the m_p factor.
         ffn_std_base = config.std_base
