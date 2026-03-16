@@ -24,9 +24,6 @@ _d_ff_to_d_model = flags.DEFINE_float(
     "d_ff_to_d_model", None, "FF dimension to model dimension ratio."
 )
 _d_ff = flags.DEFINE_integer("d_ff", None, "FF dimension.")
-_use_mu_p = flags.DEFINE_boolean(
-    "use_mu_p", False, "Use mu-p parameter initialization."
-)
 _d_base = flags.DEFINE_integer(
     "d_base", 256, "Base dimension for mu-p parameter initialization."
 )
@@ -66,7 +63,6 @@ class TransformerConfig:
     d_ff_to_d_model: float | None = None
     d_ff: int | None = None
 
-    use_mu_p: bool = False
     alpha_input: float | None = None
     alpha_output: float | None = None
     std_base: float | None = None
@@ -74,9 +70,9 @@ class TransformerConfig:
     m_p: int | None = None
 
 
-def get_transformer_config() -> TransformerConfig:
+def get_transformer_config(*, use_mu_p: bool) -> TransformerConfig:
     """Gets transformer configuration."""
-    if _use_mu_p.value:
+    if use_mu_p:
         assert (
             _alpha_input.value is not None
         ), "alpha_input must be set when use_mu_p is True."
@@ -104,7 +100,6 @@ def get_transformer_config() -> TransformerConfig:
                 d_ff_to_d_model=_d_ff_to_d_model.value,
                 d_ff=None,
             ),
-            use_mu_p=_use_mu_p.value,
             alpha_input=_alpha_input.value,
             alpha_output=_alpha_output.value,
             std_base=_std_base.value,
@@ -124,7 +119,6 @@ def get_transformer_config() -> TransformerConfig:
         d_model=_d_model.value,
         d_ff_to_d_model=_d_ff_to_d_model.value,
         d_ff=_d_ff.value,
-        use_mu_p=_use_mu_p.value,
         alpha_input=_alpha_input.value,
         alpha_output=_alpha_output.value,
         std_base=_std_base.value,
@@ -143,8 +137,9 @@ class TransformerLm(nnx.Module):
         dtype: jnp.dtype = jnp.float32,
         *,
         sharding: _sharding.TransformerLmSharding = _sharding.TransformerLmSharding(),
+        use_mu_p: bool = False,
     ):
-        if config.use_mu_p:
+        if use_mu_p:
             self._mu_p_init(config=config, rngs=rngs, dtype=dtype, sharding=sharding)
         else:
             self._s_p_init(config=config, rngs=rngs, dtype=dtype, sharding=sharding)
@@ -250,6 +245,9 @@ class TransformerLm(nnx.Module):
                 rngs=rngs,
                 dtype=dtype,
                 sharding=sharding.transformer_blocks,
+                use_mu_p=False,
+                attn_std=None,
+                ffn_std=None,
             )
 
         self.transformer_blocks = _create_transformer_block(

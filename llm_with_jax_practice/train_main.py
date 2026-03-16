@@ -8,6 +8,7 @@ from absl import app
 from absl import flags
 from absl import logging
 
+import grain
 import jax
 
 jax.config.update("jax_num_cpu_devices", 8)
@@ -101,8 +102,8 @@ def _get_model_and_optimizer(
     model_config: transformer.TransformerConfig,
     sharding: _sharding.TransformerLmSharding,
     ckpt_manager: checkpoint.CheckpointManager,
-) -> tuple[nnx.Module, nnx.Optimizer]:
-    """Gets the model and optimizer."""
+) -> tuple[nnx.Module, nnx.Optimizer, ...]:
+    """Gets the model and optimizers."""
     tx = optax.chain(
         optax.clip_by_global_norm(train_config.max_total_gradient_l2_norm),
         _optimizer.scale_by_adamw(
@@ -166,6 +167,62 @@ def _get_wandb_run(
     )
 
 
+def _run_sp_training(
+    *,
+    train_config: _train_config.TrainConfig,
+    model_config: transformer.TransformerConfig,
+    sharding: _sharding.TransformerLmSharding,
+    ckpt_manager: checkpoint.CheckpointManager,
+    training_dataset: grain.IterDataset,
+    validation_dataset: grain.IterDataset,
+    wandb_run: wandb.Run,
+    log_train_metrics_every_n_steps: int,
+    validation_every_n_steps: int,
+) -> None:
+    """Runs SP training."""
+    logging.info("Loading model with model config: %s", model_config)
+    model, optimizer = _get_model_and_optimizer(
+        train_config=train_config,
+        model_config=model_config,
+        sharding=sharding,
+        ckpt_manager=ckpt_manager,
+    )
+    logging.info(
+        "Model and optimizer loaded. Starting training loop with train config: %s",
+        train_config,
+    )
+    train_utils.sp_train_loop(
+        model=model,
+        nnx_optimizer=optimizer,
+        train_dataset=training_dataset,
+        validation_dataset=validation_dataset,
+        train_config=train_config,
+        ckpt_manager=ckpt_manager,
+        start_step=ckpt_manager.latest_step() or 0,
+        wandb_run=wandb_run,
+        log_train_metrics_every_n_steps=log_train_metrics_every_n_steps,
+        validation_every_n_steps=validation_every_n_steps,
+    )
+    logging.info("Training loop completed.")
+    ckpt_manager.wait_until_finished()
+
+
+def _run_mu_p_training(
+    *,
+    train_config: _train_config.TrainConfig,
+    model_config: transformer.TransformerConfig,
+    sharding: _sharding.TransformerLmSharding,
+    ckpt_manager: checkpoint.CheckpointManager,
+    training_dataset: grain.IterDataset,
+    validation_dataset: grain.IterDataset,
+    wandb_run: wandb.Run,
+    log_train_metrics_every_n_steps: int,
+    validation_every_n_steps: int,
+) -> None:
+    """Runs MuP training."""
+    pass
+
+
 def main(argv: Sequence[str]) -> None:
     """Main function."""
     if len(argv) > 1:
@@ -177,7 +234,7 @@ def main(argv: Sequence[str]) -> None:
         jax.set_mesh(mesh)
 
     train_config = _train_config.get_train_config()
-    model_config = transformer.get_transformer_config()
+    model_config = transformer.get_transformer_config(use_mu_p=train_config.use_mu_p)
     ckpt_manager = checkpoint.CheckpointManager(
         checkpoint_dir=_checkpoint_dir.value,
         max_to_keep=_max_ckpts_to_keep.value,
@@ -199,13 +256,6 @@ def main(argv: Sequence[str]) -> None:
         wandb_project=_wandb_project.value,
         wandb_run_name=_wandb_run_name.value,
     )
-    logging.info("Loading model with model config: %s", model_config)
-    model, optimizer = _get_model_and_optimizer(
-        train_config=train_config,
-        model_config=model_config,
-        sharding=sharding,
-        ckpt_manager=ckpt_manager,
-    )
     training_dataset, validation_dataset = train_utils.get_datasets(
         training_data_source_path=_training_data_source_path.value,
         validation_data_source_path=_validation_data_source_path.value,
@@ -213,23 +263,31 @@ def main(argv: Sequence[str]) -> None:
         model_config=model_config,
         seed=42,
     )
-    logging.info(
-        "Model and optimizer loaded. Starting training loop with train config: %s",
-        train_config,
-    )
-    train_utils.train_loop(
-        model=model,
-        nnx_optimizer=optimizer,
-        train_dataset=training_dataset,
-        validation_dataset=validation_dataset,
-        train_config=train_config,
-        ckpt_manager=ckpt_manager,
-        start_step=ckpt_manager.latest_step() or 0,
-        wandb_run=wandb_run,
-        log_train_metrics_every_n_steps=_log_train_metrics_every_n_steps.value,
-        validation_every_n_steps=_validation_every_n_steps.value,
-    )
-    logging.info("Training loop completed.")
+    if train_config.use_mu_p:
+        _run_mu_p_training(
+            train_config=train_config,
+            model_config=model_config,
+            sharding=sharding,
+            ckpt_manager=ckpt_manager,
+            training_dataset=training_dataset,
+            validation_dataset=validation_dataset,
+            wandb_run=wandb_run,
+            log_train_metrics_every_n_steps=_log_train_metrics_every_n_steps.value,
+            validation_every_n_steps=_validation_every_n_steps.value,
+        )
+    else:
+        _run_sp_training(
+            train_config=train_config,
+            model_config=model_config,
+            sharding=sharding,
+            ckpt_manager=ckpt_manager,
+            training_dataset=training_dataset,
+            validation_dataset=validation_dataset,
+            wandb_run=wandb_run,
+            log_train_metrics_every_n_steps=_log_train_metrics_every_n_steps.value,
+            validation_every_n_steps=_validation_every_n_steps.value,
+        )
+    ckpt_manager.close()
 
 
 if __name__ == "__main__":

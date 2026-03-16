@@ -52,7 +52,7 @@ def test_checkpoint_manager_with_new_model():
         # Create a new model and optimizer to restore into
         new_model = nnx.Linear(2, 3, rngs=nnx.Rngs(42))
         # Restore checkpoint
-        restored_model, restored_optimizer, restored_metadata = manager.restore(
+        restored_model, restored_metadata, restored_optimizer = manager.restore(
             step=1, abstract_model=new_model, tx=tx
         )
 
@@ -104,12 +104,12 @@ def test_checkpoint_manager_with_abstract_model():
         grads = nnx.grad(_loss_fn)(model, x)
         test_optimizer.update(model, grads)
         # Save checkpoint
-        manager.save(step=1, model=model, optimizer=test_optimizer, metadata=metadata)
+        manager.save(step=1, model=model, metadata=metadata, optimizer=test_optimizer)
 
         # Create an abstract model to restore into
         abstract_model = nnx.eval_shape(lambda: nnx.Linear(2, 3, rngs=nnx.Rngs(42)))
         # Restore checkpoint
-        restored_model, restored_optimizer, restored_metadata = manager.restore(
+        restored_model, restored_metadata, restored_optimizer = manager.restore(
             step=1, abstract_model=abstract_model, tx=tx
         )
 
@@ -173,7 +173,7 @@ def test_checkpoint_manager_with_config():
         test_optimizer = nnx.Optimizer(model, tx, wrt=nnx.Param)
         metadata = {"epoch": 1, "loss": 0.5}
         # Save checkpoint
-        manager.save(step=1, model=model, optimizer=test_optimizer, metadata=metadata)
+        manager.save(step=1, model=model, metadata=metadata, optimizer=test_optimizer)
         manager.wait_until_finished()
         manager.close()
         del manager
@@ -202,10 +202,130 @@ def test_checkpoint_manager_with_config():
         assert new_manager.latest_step() == 1
         abstract_model = nnx.eval_shape(lambda: nnx.Linear(2, 3, rngs=nnx.Rngs(42)))
         # Restore checkpoint
-        _, _, restored_metadata = new_manager.restore(
+        _, restored_metadata, _ = new_manager.restore(
             step=1, abstract_model=abstract_model, tx=tx
         )
         assert restored_metadata == metadata
         # The config should be the original config.
         assert new_manager.train_config() == train_config
         assert new_manager.model_config() == model_config
+
+
+class MuPTestModel(nnx.Module):
+    """Test model for mu-p."""
+
+    def __init__(self, rngs: nnx.Rngs):
+        super().__init__()
+        self.layer1 = nnx.Linear(2, 3, rngs=rngs)
+        self.layer2 = nnx.Linear(3, 2, rngs=rngs)
+
+    def __call__(self, x):
+        return self.layer2(self.layer1(x))
+
+
+def test_mup_checkpoint_manager():
+    """Test mu-p checkpoint manager."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        checkpoint_dir = pathlib.Path(temp_dir)
+        # Set save_interval_steps=1 to save every time for testing
+        manager = checkpoint.MuPCheckpointManager(checkpoint_dir, save_interval_steps=1)
+
+        model = MuPTestModel(rngs=nnx.Rngs(0))
+        embedding_tx = optax.chain(
+            optimizer.scale_by_adam(
+                betas=(0.9, 0.999),
+                eps=1e-8,
+            ),
+            optimizer.scale_by_learning_rate(learning_rate=1e-3),
+        )
+        block_and_output_tx = optax.chain(
+            optimizer.scale_by_adam(
+                betas=(0.9, 0.999),
+                eps=1e-8,
+            ),
+            optimizer.scale_by_learning_rate(learning_rate=1e-4),
+        )
+
+        embedding_params_filter = nnx.All(nnx.Param, nnx.PathContains("layer1"))
+        block_and_output_params_filter = nnx.All(nnx.Param, nnx.PathContains("layer2"))
+
+        embedding_optimizer = nnx.Optimizer(
+            model, embedding_tx, wrt=embedding_params_filter
+        )
+        block_and_output_optimizer = nnx.Optimizer(
+            model, block_and_output_tx, wrt=block_and_output_params_filter
+        )
+
+        metadata = {"step": 10}
+        # Update model and optimizer state
+        x = jax.random.normal(jax.random.key(1), (1, 2))
+        grads = nnx.grad(_loss_fn)(model, x)
+        embedding_optimizer.update(model, grads)
+        block_and_output_optimizer.update(model, grads)
+
+        # Save checkpoint
+        manager.save(
+            step=10,
+            model=model,
+            metadata=metadata,
+            embedding_optimizer=embedding_optimizer,
+            block_and_output_optimizer=block_and_output_optimizer,
+        )
+        manager.wait_until_finished()
+
+        # Create an abstract model to restore into
+        abstract_model = nnx.eval_shape(lambda: MuPTestModel(rngs=nnx.Rngs(42)))
+
+        # Restore checkpoint
+        (
+            restored_model,
+            restored_metadata,
+            restored_embedding_optimizer,
+            restored_block_and_output_optimizer,
+        ) = manager.restore(
+            step=10,
+            abstract_model=abstract_model,
+            embedding_tx=embedding_tx,
+            block_and_output_tx=block_and_output_tx,
+            embedding_params_filter=embedding_params_filter,
+            block_and_output_params_filter=block_and_output_params_filter,
+        )
+
+        # Verify restoration
+        jax.tree.map(_assert_all_close, restored_model, model)
+        jax.tree.map(
+            _assert_all_close,
+            restored_embedding_optimizer.opt_state,
+            embedding_optimizer.opt_state,
+        )
+        jax.tree.map(
+            _assert_all_close,
+            restored_block_and_output_optimizer.opt_state,
+            block_and_output_optimizer.opt_state,
+        )
+        assert restored_metadata == metadata
+
+        # After taking another step on both old and new models, they should still match.
+        x = jax.random.normal(jax.random.key(2), (1, 2))
+        old_grads = nnx.grad(_loss_fn)(model, x)
+        embedding_optimizer.update(model, old_grads)
+        block_and_output_optimizer.update(model, old_grads)
+
+        jax.tree.map(_assert_not_all_close, model, restored_model)
+
+        new_grads = nnx.grad(_loss_fn)(restored_model, x)
+        restored_embedding_optimizer.update(restored_model, new_grads)
+        restored_block_and_output_optimizer.update(restored_model, new_grads)
+
+        jax.tree.map(_assert_all_close, model, restored_model)
+        jax.tree.map(
+            _assert_all_close,
+            restored_embedding_optimizer.opt_state,
+            embedding_optimizer.opt_state,
+        )
+        jax.tree.map(
+            _assert_all_close,
+            restored_block_and_output_optimizer.opt_state,
+            block_and_output_optimizer.opt_state,
+        )
+        manager.close()

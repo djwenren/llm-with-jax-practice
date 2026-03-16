@@ -62,7 +62,7 @@ def loss_fn(
     return functions.cross_entropy_loss(logits=logits, target_seq=target_seq)
 
 
-def train_loop(
+def sp_train_loop(
     model: nnx.Module,
     nnx_optimizer: nnx.Optimizer,
     train_dataset: grain.IterDataset,
@@ -77,7 +77,7 @@ def train_loop(
 ) -> None:
     """Trains the model."""
 
-    @nnx.jit(donate_argnames=("local_model", "local_optimizer"))
+    @nnx.jit(donate_argnames=("local_model", "local_optimizers"))
     def _train_step(
         local_model: nnx.Module,
         local_optimizer: nnx.Optimizer,

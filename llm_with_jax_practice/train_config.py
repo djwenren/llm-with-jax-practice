@@ -32,6 +32,9 @@ _cosine_onecycle_warmup_iters = flags.DEFINE_integer(
 _cosine_onecycle_cosine_cycle_iters = flags.DEFINE_integer(
     "cosine_onecycle_cosine_cycle_iters", 50, "Cosine onecycle cosine cycle iters."
 )
+_use_mu_p = flags.DEFINE_boolean(
+    "use_mu_p", False, "Use mu-p parameter initialization."
+)
 
 
 @nnx.dataclass
@@ -55,6 +58,8 @@ class TrainConfig(nnx.Pytree):
 
     max_total_gradient_l2_norm: float | None = None
 
+    use_mu_p: bool = False
+
 
 def get_train_config() -> TrainConfig:
     """Get train configuration."""
@@ -71,4 +76,5 @@ def get_train_config() -> TrainConfig:
         cosine_onecycle_warmup_iters=_cosine_onecycle_warmup_iters.value,
         cosine_onecycle_cosine_cycle_iters=_cosine_onecycle_cosine_cycle_iters.value,
         max_total_gradient_l2_norm=_max_total_gradient_l2_norm.value,
+        use_mu_p=_use_mu_p.value,
     )
