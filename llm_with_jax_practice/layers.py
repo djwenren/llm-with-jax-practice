@@ -45,12 +45,7 @@ class Linear(nnx.Module):
             * jnp.array(std, dtype=dtype)
         )
         self.out_sharding = sharding.out
-        # Need to wrap this in an `nnx.Variable`, otherwise the `jax.lax.scan` call in
-        # `TransformerLm.__call__` will fail because `self.alpha` will be `vmap`'ed into of shape
-        # `(num_layers, )` as done in `TransformerLm.__init__`. By wrapping it in an `nnx.Variable`,
-        # the `jax.lax.scan` call will be able to take one value/scalar element of `self.alpha` at a
-        # time for each layer.
-        self.alpha = nnx.Variable(jnp.array(alpha or 1.0, dtype=dtype))
+        self.alpha = alpha or 1.0
 
     def __call__(
         self,
@@ -60,7 +55,7 @@ class Linear(nnx.Module):
             jnp.einsum(
                 "...D, DF -> ... F", x, self.weight, out_sharding=self.out_sharding
             )
-            * self.alpha[...]
+            * self.alpha
         )
         return output
 
@@ -91,19 +86,13 @@ class Embedding(nnx.Module):
             * jnp.array(std, dtype=dtype)
         )
         self.out_sharding = sharding.out
-        # Need to wrap this in an `nnx.Variable`, otherwise the `jax.lax.scan` call in
-        # `TransformerLm.__call__` will fail because `self.alpha` will be `vmap`'ed into of shape
-        # `(num_layers, )` as done in `TransformerLm.__init__`. By wrapping it in an `nnx.Variable`,
-        # the `jax.lax.scan` call will be able to take one value/scalar element of `self.alpha` at a
-        # time for each layer.
-        self.alpha = nnx.Variable(jnp.array(alpha or 1.0, dtype=dtype))
+        self.alpha = alpha or 1.0
 
     def __call__(
         self, token_ids: Int[Array, "..."]
     ) -> Float[Array, "... embedding_dim"]:
         return (
-            self.weight.at[token_ids].get(out_sharding=self.out_sharding)
-            * self.alpha[...]
+            self.weight.at[token_ids].get(out_sharding=self.out_sharding) * self.alpha
         )
 
 
