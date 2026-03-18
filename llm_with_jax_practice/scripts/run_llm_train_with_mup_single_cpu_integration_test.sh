@@ -31,6 +31,7 @@ COSINE_ONECYCLE_MAX_LEARNING_RATE=1e-3
 COSINE_ONECYCLE_MIN_LEARNING_RATE=1e-4
 COSINE_ONECYCLE_WARMUP_ITERS=100
 COSINE_ONECYCLE_COSINE_CYCLE_ITERS=4900
+USE_MU_P=True
 
 # Model config
 # VOCAB_SIZE=10000
@@ -49,7 +50,12 @@ ROPE_THETA=10000
 D_MODEL=256
 D_FF_TO_D_MODEL=2.6666667
 D_FF=672
-SHARDING_STRATEGY="fsdp_tp"
+D_BASE=128
+M_P=1
+ALPHA_INPUT=1.0
+ALPHA_OUTPUT=1.0
+STD_BASE=0.001
+SHARDING_STRATEGY="none"
 
 TRAIN_CMD="uv run llm_with_jax_practice/train_main.py"
 
@@ -77,6 +83,7 @@ ${TRAIN_CMD} \
   --cosine_onecycle_min_learning_rate="${COSINE_ONECYCLE_MIN_LEARNING_RATE}" \
   --cosine_onecycle_warmup_iters="${COSINE_ONECYCLE_WARMUP_ITERS}" \
   --cosine_onecycle_cosine_cycle_iters="${COSINE_ONECYCLE_COSINE_CYCLE_ITERS}" \
+  --use_mu_p="${USE_MU_P}" \
   --vocab_size="${VOCAB_SIZE}" \
   --context_length="${CONTEXT_LENGTH}" \
   --num_layers="${NUM_LAYERS}" \
@@ -85,4 +92,9 @@ ${TRAIN_CMD} \
   --d_model="${D_MODEL}" \
   --d_ff_to_d_model="${D_FF_TO_D_MODEL}" \
   --d_ff="${D_FF}" \
+  --d_base="${D_BASE}" \
+  --m_p="${M_P}" \
+  --alpha_input="${ALPHA_INPUT}" \
+  --alpha_output="${ALPHA_OUTPUT}" \
+  --std_base="${STD_BASE}" \
   --sharding_strategy="${SHARDING_STRATEGY}"

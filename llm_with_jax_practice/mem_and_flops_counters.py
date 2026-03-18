@@ -608,8 +608,7 @@ class TransformerLmMemAndFlopsCounter:
             max_seq_len=config.context_length,
             dtype=dtype,
         )
-        d_ff = transformer.TransformerLm._get_d_ff(
-            None,
+        d_ff = transformer._get_d_ff(
             d_model=config.d_model,
             d_ff_to_d_model=config.d_ff_to_d_model,
             d_ff=config.d_ff,

@@ -49,7 +49,7 @@ def _get_d_ff(d_model: int, d_ff_to_d_model: float | None, d_ff: int | None) -> 
 
 
 @dataclasses.dataclass(kw_only=True, frozen=True)
-class TransformerConfig:
+class TransformerConfig:  # pylint: disable=too-many-instance-attributes
     """Tranformer config."""
 
     vocab_size: int
@@ -104,6 +104,7 @@ def get_transformer_config(*, use_mu_p: bool) -> TransformerConfig:
             alpha_output=_alpha_output.value,
             std_base=_std_base.value,
             d_base=_d_base.value,
+            m_p=_m_p.value,
         )
 
     assert _d_model.value is not None, "d_model must be set when use_mu_p is False."

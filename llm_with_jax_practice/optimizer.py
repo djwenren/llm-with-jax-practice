@@ -34,8 +34,8 @@ def scale_by_adam(
     def init_fn(params: PyTree[jax.Array]) -> AdamState:
         """Initializes the AdamW optimizer."""
         return AdamState(
-            ms=jax.tree.map(lambda x: jnp.zeros_like(x, dtype=x.dtype), params),
-            vs=jax.tree.map(lambda x: jnp.zeros_like(x, dtype=x.dtype), params),
+            ms=jax.tree.map(jnp.zeros_like, params),
+            vs=jax.tree.map(jnp.zeros_like, params),
             step=jnp.array(0, dtype=jnp.int32),
         )
 

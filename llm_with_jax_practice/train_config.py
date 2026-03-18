@@ -51,6 +51,9 @@ class TrainConfig(nnx.Pytree):
     adamw_eps: float = 1e-8
     adamw_weight_decay: float = 1e-3
 
+    # In the case muP, these learning rates are the base learning rates for the embedding and
+    # block/output layers.
+    # In the case SP, these learning rates are the only learning rates used.
     cosine_onecycle_max_learning_rate: float = 1e-3
     cosine_onecycle_min_learning_rate: float = 1e-4
     cosine_onecycle_warmup_iters: int = 50

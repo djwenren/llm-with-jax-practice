@@ -289,7 +289,15 @@ class MuPCheckpointManager(BaseCheckpointManager):
         metadata: PyTree[Any],
         **kwargs,
     ) -> None:
-        """Saves the checkpoint."""
+        """Saves the checkpoint.
+
+        Args:
+            step: The step to save at.
+            model: The model to save.
+            metadata: The metadata to save.
+            embedding_optimizer: The embedding optimizer to save.
+            block_and_output_optimizer: The block and output optimizer to save.
+        """
         assert "embedding_optimizer" in kwargs, "embedding_optimizer must be provided"
         embedding_optimizer = kwargs["embedding_optimizer"]
         assert isinstance(
@@ -326,7 +334,18 @@ class MuPCheckpointManager(BaseCheckpointManager):
         abstract_model: nnx.Module,
         **kwargs,
     ) -> tuple[nnx.Module, PyTree[Any], ...]:
-        """Restores the checkpoint."""
+        """Restores the checkpoint.
+
+        Args:
+            step: The step to restore from.
+            abstract_model: The abstract model to restore into.
+            embedding_tx: The embedding gradient transformation.
+            block_and_output_tx: The block and output gradient transformation.
+            embedding_params_filter: The embedding parameters filter.
+            block_and_output_params_filter: The block and output parameters filter.
+        Returns:
+            A tuple of (model, metadata, embedding_optimizer, block_and_output_optimizer).
+        """
         assert "embedding_tx" in kwargs, "embedding_tx must be provided"
         embedding_tx = kwargs["embedding_tx"]
         assert isinstance(

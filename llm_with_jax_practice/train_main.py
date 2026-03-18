@@ -1,22 +1,18 @@
 """Train main."""
 
-import dataclasses
-
 from typing import Sequence
+
+import dataclasses
 
 from absl import app
 from absl import flags
 from absl import logging
+from flax import nnx
 
 import grain
 import jax
-
-jax.config.update("jax_num_cpu_devices", 8)
-
 import optax
 import wandb
-
-from flax import nnx
 
 from llm_with_jax_practice import checkpoint
 from llm_with_jax_practice import optimizer as _optimizer
@@ -79,6 +75,32 @@ def _get_mesh_and_sharding(
     return None, _sharding.TransformerLmSharding()
 
 
+def _get_ckpt_manager(
+    *,
+    checkpoint_dir: str,
+    max_to_keep: int,
+    save_interval_steps: int,
+    train_config: _train_config.TrainConfig,
+    model_config: transformer.TransformerConfig,
+) -> checkpoint.BaseCheckpointManager:
+    """Gets the checkpoint manager."""
+    if train_config.use_mu_p:
+        return checkpoint.MuPCheckpointManager(
+            checkpoint_dir=checkpoint_dir,
+            max_to_keep=max_to_keep,
+            save_interval_steps=save_interval_steps,
+            train_config=train_config,
+            model_config=model_config,
+        )
+    return checkpoint.CheckpointManager(
+        checkpoint_dir=checkpoint_dir,
+        max_to_keep=max_to_keep,
+        save_interval_steps=save_interval_steps,
+        train_config=train_config,
+        model_config=model_config,
+    )
+
+
 def _reconcile_train_config_and_model_config(
     train_config: _train_config.TrainConfig,
     model_config: transformer.TransformerConfig,
@@ -97,13 +119,17 @@ def _reconcile_train_config_and_model_config(
     return train_config, model_config
 
 
-def _get_model_and_optimizer(
+def _get_sp_model_and_optimizer(
     train_config: _train_config.TrainConfig,
     model_config: transformer.TransformerConfig,
     sharding: _sharding.TransformerLmSharding,
     ckpt_manager: checkpoint.CheckpointManager,
-) -> tuple[nnx.Module, nnx.Optimizer, ...]:
+) -> tuple[nnx.Module, nnx.Optimizer]:
     """Gets the model and optimizers."""
+    assert (
+        not train_config.use_mu_p
+    ), "use_mu_p must be False to get SP model and optimizer."
+
     tx = optax.chain(
         optax.clip_by_global_norm(train_config.max_total_gradient_l2_norm),
         _optimizer.scale_by_adamw(
@@ -139,12 +165,106 @@ def _get_model_and_optimizer(
             config=model_config, rngs=nnx.Rngs(jax.random.key(42)), sharding=sharding
         )
     )
-    model, optimizer, _ = ckpt_manager.restore(
+    model, _, optimizer = ckpt_manager.restore(
         step=latest_step,
         abstract_model=abstract_model,
         tx=tx,
     )
     return model, optimizer
+
+
+def _get_mu_p_model_and_optimizer(
+    train_config: _train_config.TrainConfig,
+    model_config: transformer.TransformerConfig,
+    sharding: _sharding.TransformerLmSharding,
+    ckpt_manager: checkpoint.MuPCheckpointManager,
+) -> tuple[nnx.Module, nnx.Optimizer, nnx.Optimizer]:
+    """Gets the mu-p model and optimizers.
+
+    Args:
+        train_config: The train configuration.
+        model_config: The model configuration.
+        sharding: The sharding.
+        ckpt_manager: The checkpoint manager.
+    Returns:
+        A tuple of (model, embedding_optimizer, block_and_output_optimizer).
+    """
+    assert (
+        train_config.use_mu_p
+    ), "use_mu_p must be True to get mu-p model and optimizers."
+
+    tx_embedding = optax.chain(
+        optax.clip_by_global_norm(train_config.max_total_gradient_l2_norm),
+        _optimizer.scale_by_adamw(
+            betas=(train_config.adamw_beta_1, train_config.adamw_beta_2),
+            eps=train_config.adamw_eps,
+            weight_decay=train_config.adamw_weight_decay,
+        ),
+        _optimizer.scale_by_schedule(
+            _optimizer.cosine_onecycle_schedule(
+                max_learning_rate=train_config.cosine_onecycle_max_learning_rate,
+                min_learning_rate=train_config.cosine_onecycle_min_learning_rate,
+                warmup_iters=train_config.cosine_onecycle_warmup_iters,
+                cosine_cycle_iters=train_config.cosine_onecycle_cosine_cycle_iters,
+            )
+        ),
+    )
+    tx_block_and_output = optax.chain(
+        optax.clip_by_global_norm(train_config.max_total_gradient_l2_norm),
+        _optimizer.scale_by_adamw(
+            betas=(train_config.adamw_beta_1, train_config.adamw_beta_2),
+            eps=train_config.adamw_eps,
+            weight_decay=train_config.adamw_weight_decay,
+        ),
+        _optimizer.scale_by_schedule(
+            _optimizer.cosine_onecycle_schedule(
+                max_learning_rate=train_config.cosine_onecycle_max_learning_rate
+                / model_config.m_p,
+                min_learning_rate=train_config.cosine_onecycle_min_learning_rate
+                / model_config.m_p,
+                warmup_iters=train_config.cosine_onecycle_warmup_iters,
+                cosine_cycle_iters=train_config.cosine_onecycle_cosine_cycle_iters,
+            )
+        ),
+    )
+    latest_step = ckpt_manager.latest_step()
+    embedding_params_filter = nnx.All(nnx.Param, nnx.PathContains("token_embeddings"))
+    block_and_output_params_filter = nnx.All(
+        nnx.Param, nnx.Not(nnx.PathContains("token_embeddings"))
+    )
+
+    @nnx.jit
+    def _get_fresh_model_and_optimizers():
+        model = transformer.TransformerLm(
+            config=model_config, rngs=nnx.Rngs(jax.random.key(42)), sharding=sharding
+        )
+        embedding_optimizer = nnx.Optimizer(
+            model, tx_embedding, wrt=embedding_params_filter
+        )
+        block_and_output_optimizer = nnx.Optimizer(
+            model, tx_block_and_output, wrt=block_and_output_params_filter
+        )
+        return model, embedding_optimizer, block_and_output_optimizer
+
+    if latest_step is None:
+        return _get_fresh_model_and_optimizers()
+
+    # Restoration involves complex file IO, so we do it outside of JIT.
+    abstract_model = nnx.eval_shape(
+        lambda: transformer.TransformerLm(
+            config=model_config, rngs=nnx.Rngs(jax.random.key(42)), sharding=sharding
+        )
+    )
+
+    model, _, embedding_optimizer, block_and_output_optimizer = ckpt_manager.restore(
+        step=latest_step,
+        abstract_model=abstract_model,
+        embedding_tx=tx_embedding,
+        block_and_output_tx=tx_block_and_output,
+        embedding_params_filter=embedding_params_filter,
+        block_and_output_params_filter=block_and_output_params_filter,
+    )
+    return model, embedding_optimizer, block_and_output_optimizer
 
 
 def _get_wandb_run(
@@ -172,7 +292,7 @@ def _run_sp_training(
     train_config: _train_config.TrainConfig,
     model_config: transformer.TransformerConfig,
     sharding: _sharding.TransformerLmSharding,
-    ckpt_manager: checkpoint.CheckpointManager,
+    ckpt_manager: checkpoint.BaseCheckpointManager,
     training_dataset: grain.IterDataset,
     validation_dataset: grain.IterDataset,
     wandb_run: wandb.Run,
@@ -180,8 +300,13 @@ def _run_sp_training(
     validation_every_n_steps: int,
 ) -> None:
     """Runs SP training."""
+    assert isinstance(
+        ckpt_manager, checkpoint.CheckpointManager
+    ), "ckpt_manager must be an instance of CheckpointManager"
+
+    logging.info("Running training with standard parameterization.")
     logging.info("Loading model with model config: %s", model_config)
-    model, optimizer = _get_model_and_optimizer(
+    model, optimizer = _get_sp_model_and_optimizer(
         train_config=train_config,
         model_config=model_config,
         sharding=sharding,
@@ -204,7 +329,6 @@ def _run_sp_training(
         validation_every_n_steps=validation_every_n_steps,
     )
     logging.info("Training loop completed.")
-    ckpt_manager.wait_until_finished()
 
 
 def _run_mu_p_training(
@@ -212,7 +336,7 @@ def _run_mu_p_training(
     train_config: _train_config.TrainConfig,
     model_config: transformer.TransformerConfig,
     sharding: _sharding.TransformerLmSharding,
-    ckpt_manager: checkpoint.CheckpointManager,
+    ckpt_manager: checkpoint.BaseCheckpointManager,
     training_dataset: grain.IterDataset,
     validation_dataset: grain.IterDataset,
     wandb_run: wandb.Run,
@@ -220,7 +344,39 @@ def _run_mu_p_training(
     validation_every_n_steps: int,
 ) -> None:
     """Runs MuP training."""
-    pass
+    assert isinstance(
+        ckpt_manager, checkpoint.MuPCheckpointManager
+    ), "ckpt_manager must be an instance of MuPCheckpointManager"
+
+    logging.info("Running training with mu-p parameterization.")
+    logging.info("Loading model with model config: %s", model_config)
+    model, embedding_optimizer, block_and_output_optimizer = (
+        _get_mu_p_model_and_optimizer(
+            train_config=train_config,
+            model_config=model_config,
+            sharding=sharding,
+            ckpt_manager=ckpt_manager,
+        )
+    )
+    logging.info(
+        "Model, embedding optimizer, and block and output optimizer loaded. Starting training loop "
+        "with train config: %s",
+        train_config,
+    )
+    train_utils.mu_p_train_loop(
+        model=model,
+        embedding_optimizer=embedding_optimizer,
+        block_and_output_optimizer=block_and_output_optimizer,
+        train_dataset=training_dataset,
+        validation_dataset=validation_dataset,
+        train_config=train_config,
+        ckpt_manager=ckpt_manager,
+        start_step=ckpt_manager.latest_step() or 0,
+        wandb_run=wandb_run,
+        log_train_metrics_every_n_steps=log_train_metrics_every_n_steps,
+        validation_every_n_steps=validation_every_n_steps,
+    )
+    logging.info("Training loop completed.")
 
 
 def main(argv: Sequence[str]) -> None:
@@ -235,7 +391,13 @@ def main(argv: Sequence[str]) -> None:
 
     train_config = _train_config.get_train_config()
     model_config = transformer.get_transformer_config(use_mu_p=train_config.use_mu_p)
-    ckpt_manager = checkpoint.CheckpointManager(
+    # If there is already a checkpoint directory, we use it, the train_config and model_config
+    # returned from the ckpt_manager will be whatever that is already in the checkpoint directory,
+    # independent on the train_config and model_config passed in. The difference in train_config
+    # and model_config in the ckpt_manager and the ones loaded from command line are then reconciled
+    # in _reconcile_train_config_and_model_config based on the
+    # use_model_and_train_config_from_checkpoint flag.
+    ckpt_manager = _get_ckpt_manager(
         checkpoint_dir=_checkpoint_dir.value,
         max_to_keep=_max_ckpts_to_keep.value,
         save_interval_steps=_ckpt_save_interval_steps.value,
@@ -287,6 +449,7 @@ def main(argv: Sequence[str]) -> None:
             log_train_metrics_every_n_steps=_log_train_metrics_every_n_steps.value,
             validation_every_n_steps=_validation_every_n_steps.value,
         )
+    ckpt_manager.wait_until_finished()
     ckpt_manager.close()
 
 
