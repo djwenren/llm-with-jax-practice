@@ -425,6 +425,8 @@ def main(argv: Sequence[str]) -> None:
         model_config=model_config,
         seed=42,
     )
+    # TODO(djwenren): figure out if the training and validation data need to be explicitly moved to
+    # devices.
     if train_config.use_mu_p:
         _run_mu_p_training(
             train_config=train_config,
