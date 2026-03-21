@@ -18,6 +18,7 @@ class CountingResults:
 
     num_trainable_params: int | np.int64
     num_non_trainable_params: int | np.int64
+    # Model state bytes, including trainable and non-trainable parameters.
     state_bytes: int | np.int64
     optimizer_num_params: int | np.int64
     optimizer_param_bytes: int | np.int64
@@ -42,7 +43,9 @@ class LinearMemAndFlopsCounter:
         )
         self._num_trainable_params = np.prod(self._linear.weight.shape)
         self._num_non_trainable_params = 0
-        self._state_bytes = self._num_trainable_params * self._linear.weight.dtype.itemsize
+        self._state_bytes = (
+            self._num_trainable_params * self._linear.weight.dtype.itemsize
+        )
 
     @property
     def num_trainable_params(self) -> int:
@@ -112,7 +115,9 @@ class EmbeddingMemAndFlopsCounter:
         )
         self._num_trainable_params = np.prod(self._embedding.weight.shape)
         self._num_non_trainable_params = 0
-        self._state_bytes = self._num_trainable_params * self._embedding.weight.dtype.itemsize
+        self._state_bytes = (
+            self._num_trainable_params * self._embedding.weight.dtype.itemsize
+        )
 
     @property
     def num_trainable_params(self) -> int:
@@ -155,7 +160,9 @@ class RMSNormMemAndFlopsCounter:
         )
         self._num_trainable_params = d_model
         self._num_non_trainable_params = 0
-        self._state_bytes = self._num_trainable_params * self._rmsnorm.weight.dtype.itemsize
+        self._state_bytes = (
+            self._num_trainable_params * self._rmsnorm.weight.dtype.itemsize
+        )
 
     @property
     def num_trainable_params(self) -> int:
@@ -301,7 +308,9 @@ class RoPEMemAndFlopsCounter:
         )
         self._num_trainable_params = 0
         self._num_non_trainable_params = self._rope.rope_matrix.size
-        self._state_bytes = self._num_non_trainable_params * self._rope.rope_matrix.dtype.itemsize
+        self._state_bytes = (
+            self._num_non_trainable_params * self._rope.rope_matrix.dtype.itemsize
+        )
 
     @property
     def num_trainable_params(self) -> int:
