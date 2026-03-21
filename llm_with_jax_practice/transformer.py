@@ -24,6 +24,9 @@ _d_ff_to_d_model = flags.DEFINE_float(
     "d_ff_to_d_model", None, "FF dimension to model dimension ratio."
 )
 _d_ff = flags.DEFINE_integer("d_ff", None, "FF dimension.")
+_dtype = flags.DEFINE_enum(
+    "dtype", "float32", ["float32", "bfloat16", "float16"], "Data type."
+)
 _d_base = flags.DEFINE_integer(
     "d_base", 256, "Base dimension for mu-p parameter initialization."
 )
@@ -48,6 +51,18 @@ def _get_d_ff(d_model: int, d_ff_to_d_model: float | None, d_ff: int | None) -> 
     return math.ceil(d_model * d_ff_to_d_model / 64) * 64
 
 
+def _get_dtype() -> jnp.dtype:
+    match _dtype.value:
+        case "float32":
+            return jnp.float32
+        case "bfloat16":
+            return jnp.bfloat16
+        case "float16":
+            return jnp.float16
+        case _:
+            raise ValueError(f"Invalid dtype: {_dtype.value}.")
+
+
 @dataclasses.dataclass(kw_only=True, frozen=True)
 class TransformerConfig:  # pylint: disable=too-many-instance-attributes
     """Tranformer config."""
@@ -62,6 +77,7 @@ class TransformerConfig:  # pylint: disable=too-many-instance-attributes
     d_model: int | None = None
     d_ff_to_d_model: float | None = None
     d_ff: int | None = None
+    dtype: jnp.dtype = jnp.float32
 
     alpha_input: float | None = None
     alpha_output: float | None = None
@@ -100,6 +116,7 @@ def get_transformer_config(*, use_mu_p: bool) -> TransformerConfig:
                 d_ff_to_d_model=_d_ff_to_d_model.value,
                 d_ff=None,
             ),
+            dtype=_get_dtype(),
             alpha_input=_alpha_input.value,
             alpha_output=_alpha_output.value,
             std_base=_std_base.value,
@@ -120,6 +137,7 @@ def get_transformer_config(*, use_mu_p: bool) -> TransformerConfig:
         d_model=_d_model.value,
         d_ff_to_d_model=_d_ff_to_d_model.value,
         d_ff=_d_ff.value,
+        dtype=_get_dtype(),
         alpha_input=_alpha_input.value,
         alpha_output=_alpha_output.value,
         std_base=_std_base.value,
@@ -135,22 +153,20 @@ class TransformerLm(nnx.Module):
         self,
         config: TransformerConfig,
         rngs: nnx.Rngs,
-        dtype: jnp.dtype = jnp.float32,
         *,
         sharding: _sharding.TransformerLmSharding = _sharding.TransformerLmSharding(),
         use_mu_p: bool = False,
     ):
         if use_mu_p:
-            self._mu_p_init(config=config, rngs=rngs, dtype=dtype, sharding=sharding)
+            self._mu_p_init(config=config, rngs=rngs, sharding=sharding)
         else:
-            self._s_p_init(config=config, rngs=rngs, dtype=dtype, sharding=sharding)
+            self._s_p_init(config=config, rngs=rngs, sharding=sharding)
 
     def _mu_p_init(
         self,
         *,
         config: TransformerConfig,
         rngs: nnx.Rngs,
-        dtype: jnp.dtype = jnp.float32,
         sharding: _sharding.TransformerLmSharding = _sharding.TransformerLmSharding(),
     ) -> None:
         """Initializes the transformer language model with mu-p parameter initialization."""
@@ -158,7 +174,7 @@ class TransformerLm(nnx.Module):
             num_embeddings=config.vocab_size,
             embedding_dim=config.d_model,
             rngs=rngs,
-            dtype=dtype,
+            dtype=config.dtype,
             sharding=sharding.token_embeddings,
             std=config.std_base,
             alpha=config.alpha_input,
@@ -188,7 +204,7 @@ class TransformerLm(nnx.Module):
                     d_ff=config.d_ff,
                 ),
                 rngs=rngs,
-                dtype=dtype,
+                dtype=config.dtype,
                 sharding=sharding.transformer_blocks,
                 use_mu_p=True,
                 attn_std=config.std_base / math.sqrt(config.m_p),
@@ -199,13 +215,13 @@ class TransformerLm(nnx.Module):
             rngs.fork(split=config.num_layers)
         )
         self.ln_final = L.RMSNorm(
-            d_model=config.d_model, dtype=dtype, sharding=sharding.ln_final
+            d_model=config.d_model, dtype=config.dtype, sharding=sharding.ln_final
         )
         self.lm_head = L.Linear(
             in_features=config.d_model,
             out_features=config.vocab_size,
             rngs=rngs,
-            dtype=dtype,
+            dtype=config.dtype,
             sharding=sharding.lm_head,
             std=config.std_base / math.sqrt(config.m_p),
             alpha=config.alpha_output / config.m_p,
@@ -216,7 +232,6 @@ class TransformerLm(nnx.Module):
         *,
         config: TransformerConfig,
         rngs: nnx.Rngs,
-        dtype: jnp.dtype = jnp.float32,
         sharding: _sharding.TransformerLmSharding = _sharding.TransformerLmSharding(),
     ) -> None:
         """Initializes the transformer language model with standard parameter initialization."""
@@ -224,7 +239,7 @@ class TransformerLm(nnx.Module):
             num_embeddings=config.vocab_size,
             embedding_dim=config.d_model,
             rngs=rngs,
-            dtype=dtype,
+            dtype=config.dtype,
             sharding=sharding.token_embeddings,
         )
         self.rope = L.RoPE(
@@ -244,7 +259,7 @@ class TransformerLm(nnx.Module):
                     d_ff=config.d_ff,
                 ),
                 rngs=rngs,
-                dtype=dtype,
+                dtype=config.dtype,
                 sharding=sharding.transformer_blocks,
                 use_mu_p=False,
                 attn_std=None,
@@ -255,13 +270,13 @@ class TransformerLm(nnx.Module):
             rngs.fork(split=config.num_layers)
         )
         self.ln_final = L.RMSNorm(
-            d_model=config.d_model, dtype=dtype, sharding=sharding.ln_final
+            d_model=config.d_model, dtype=config.dtype, sharding=sharding.ln_final
         )
         self.lm_head = L.Linear(
             in_features=config.d_model,
             out_features=config.vocab_size,
             rngs=rngs,
-            dtype=dtype,
+            dtype=config.dtype,
             sharding=sharding.lm_head,
         )
 
