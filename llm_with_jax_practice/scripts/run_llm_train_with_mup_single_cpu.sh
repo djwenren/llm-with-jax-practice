@@ -43,6 +43,7 @@ ROPE_THETA=10000
 D_FF_TO_D_MODEL=2.6666667
 D_BASE=256
 M_P=1
+DTYPE="bfloat16"
 ALPHA_INPUT=1.0
 ALPHA_OUTPUT=1.0
 STD_BASE=0.001
@@ -83,6 +84,7 @@ ${TRAIN_CMD} \
   --d_ff_to_d_model="${D_FF_TO_D_MODEL}" \
   --d_base="${D_BASE}" \
   --m_p="${M_P}" \
+  --dtype="${DTYPE}" \
   --alpha_input="${ALPHA_INPUT}" \
   --alpha_output="${ALPHA_OUTPUT}" \
   --std_base="${STD_BASE}" \
