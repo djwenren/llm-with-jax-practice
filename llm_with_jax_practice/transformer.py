@@ -1,5 +1,7 @@
 """Transformer for LLM with JAX Practice."""
 
+from typing import Literal
+
 import dataclasses
 import math
 
@@ -51,16 +53,25 @@ def _get_d_ff(d_model: int, d_ff_to_d_model: float | None, d_ff: int | None) -> 
     return math.ceil(d_model * d_ff_to_d_model / 64) * 64
 
 
-def _get_dtype() -> jnp.dtype:
-    match _dtype.value:
+def _config_dtype_str() -> Literal["float32", "bfloat16", "float16"]:
+    """Narrow absl enum flag value to the dtype names used in ``TransformerConfig``."""
+    v = _dtype.value
+    match v:
+        case "float32" | "bfloat16" | "float16":
+            return v
+        case _:
+            raise ValueError(f"Invalid dtype: {v!r}.")
+
+
+def get_dtype(dtype_str: Literal["float32", "bfloat16", "float16"]) -> jnp.dtype:
+    """Gets JAX dtype from string."""
+    match dtype_str:
         case "float32":
             return jnp.float32
         case "bfloat16":
             return jnp.bfloat16
         case "float16":
             return jnp.float16
-        case _:
-            raise ValueError(f"Invalid dtype: {_dtype.value}.")
 
 
 @dataclasses.dataclass(kw_only=True, frozen=True)
@@ -74,10 +85,10 @@ class TransformerConfig:  # pylint: disable=too-many-instance-attributes
 
     rope_theta: float
 
-    d_model: int | None = None
+    d_model: int
+    d_ff: int
     d_ff_to_d_model: float | None = None
-    d_ff: int | None = None
-    dtype: jnp.dtype = jnp.float32
+    dtype: Literal["float32", "bfloat16", "float16"] = "float32"
 
     alpha_input: float | None = None
     alpha_output: float | None = None
@@ -116,7 +127,7 @@ def get_transformer_config(*, use_mu_p: bool) -> TransformerConfig:
                 d_ff_to_d_model=_d_ff_to_d_model.value,
                 d_ff=None,
             ),
-            dtype=_get_dtype(),
+            dtype=_config_dtype_str(),
             alpha_input=_alpha_input.value,
             alpha_output=_alpha_output.value,
             std_base=_std_base.value,
@@ -136,8 +147,12 @@ def get_transformer_config(*, use_mu_p: bool) -> TransformerConfig:
         rope_theta=_rope_theta.value,
         d_model=_d_model.value,
         d_ff_to_d_model=_d_ff_to_d_model.value,
-        d_ff=_d_ff.value,
-        dtype=_get_dtype(),
+        d_ff=_get_d_ff(
+            d_model=_d_model.value,
+            d_ff_to_d_model=_d_ff_to_d_model.value,
+            d_ff=_d_ff.value,
+        ),
+        dtype=_config_dtype_str(),
         alpha_input=_alpha_input.value,
         alpha_output=_alpha_output.value,
         std_base=_std_base.value,
@@ -174,7 +189,7 @@ class TransformerLm(nnx.Module):
             num_embeddings=config.vocab_size,
             embedding_dim=config.d_model,
             rngs=rngs,
-            dtype=config.dtype,
+            dtype=get_dtype(config.dtype),
             sharding=sharding.token_embeddings,
             std=config.std_base,
             alpha=config.alpha_input,
@@ -204,27 +219,45 @@ class TransformerLm(nnx.Module):
                     d_ff=config.d_ff,
                 ),
                 rngs=rngs,
-                dtype=config.dtype,
+                dtype=get_dtype(config.dtype),
                 sharding=sharding.transformer_blocks,
                 use_mu_p=True,
-                attn_std=config.std_base / math.sqrt(config.m_p),
-                ffn_std=ffn_std_base / math.sqrt(config.m_p),
+                attn_std=(
+                    config.std_base / math.sqrt(config.m_p)
+                    if config.m_p is not None and config.std_base is not None
+                    else None
+                ),
+                ffn_std=(
+                    ffn_std_base / math.sqrt(config.m_p)
+                    if config.m_p is not None and ffn_std_base is not None
+                    else None
+                ),
             )
 
         self.transformer_blocks = _create_transformer_block(
             rngs.fork(split=config.num_layers)
         )
         self.ln_final = L.RMSNorm(
-            d_model=config.d_model, dtype=config.dtype, sharding=sharding.ln_final
+            d_model=config.d_model,
+            dtype=get_dtype(config.dtype),
+            sharding=sharding.ln_final,
         )
         self.lm_head = L.Linear(
             in_features=config.d_model,
             out_features=config.vocab_size,
             rngs=rngs,
-            dtype=config.dtype,
+            dtype=get_dtype(config.dtype),
             sharding=sharding.lm_head,
-            std=config.std_base / math.sqrt(config.m_p),
-            alpha=config.alpha_output / config.m_p,
+            std=(
+                config.std_base / math.sqrt(config.m_p)
+                if config.m_p is not None and config.std_base is not None
+                else None
+            ),
+            alpha=(
+                config.alpha_output / config.m_p
+                if config.m_p is not None and config.alpha_output is not None
+                else None
+            ),
         )
 
     def _s_p_init(
@@ -239,7 +272,7 @@ class TransformerLm(nnx.Module):
             num_embeddings=config.vocab_size,
             embedding_dim=config.d_model,
             rngs=rngs,
-            dtype=config.dtype,
+            dtype=get_dtype(config.dtype),
             sharding=sharding.token_embeddings,
         )
         self.rope = L.RoPE(
@@ -259,7 +292,7 @@ class TransformerLm(nnx.Module):
                     d_ff=config.d_ff,
                 ),
                 rngs=rngs,
-                dtype=config.dtype,
+                dtype=get_dtype(config.dtype),
                 sharding=sharding.transformer_blocks,
                 use_mu_p=False,
                 attn_std=None,
@@ -270,13 +303,15 @@ class TransformerLm(nnx.Module):
             rngs.fork(split=config.num_layers)
         )
         self.ln_final = L.RMSNorm(
-            d_model=config.d_model, dtype=config.dtype, sharding=sharding.ln_final
+            d_model=config.d_model,
+            dtype=get_dtype(config.dtype),
+            sharding=sharding.ln_final,
         )
         self.lm_head = L.Linear(
             in_features=config.d_model,
             out_features=config.vocab_size,
             rngs=rngs,
-            dtype=config.dtype,
+            dtype=get_dtype(config.dtype),
             sharding=sharding.lm_head,
         )
 

@@ -80,9 +80,7 @@ ${TRAIN_CMD} \
   --num_layers="${NUM_LAYERS}" \
   --num_heads="${NUM_HEADS}" \
   --rope_theta="${ROPE_THETA}" \
-  --d_model="${D_MODEL}" \
   --d_ff_to_d_model="${D_FF_TO_D_MODEL}" \
-  --d_ff="${D_FF}" \
   --d_base="${D_BASE}" \
   --m_p="${M_P}" \
   --alpha_input="${ALPHA_INPUT}" \
