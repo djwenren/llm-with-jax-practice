@@ -35,6 +35,9 @@ _cosine_onecycle_cosine_cycle_iters = flags.DEFINE_integer(
 _use_mu_p = flags.DEFINE_boolean(
     "use_mu_p", False, "Use mu-p parameter initialization."
 )
+_num_microbatches = flags.DEFINE_integer(
+    "num_microbatches", 1, "Number of microbatches."
+)
 
 
 @nnx.dataclass
@@ -63,6 +66,8 @@ class TrainConfig(nnx.Pytree):
 
     use_mu_p: bool = False
 
+    num_microbatches: int = 1
+
 
 def get_train_config() -> TrainConfig:
     """Get train configuration."""
@@ -80,4 +85,5 @@ def get_train_config() -> TrainConfig:
         cosine_onecycle_cosine_cycle_iters=_cosine_onecycle_cosine_cycle_iters.value,
         max_total_gradient_l2_norm=_max_total_gradient_l2_norm.value,
         use_mu_p=_use_mu_p.value,
+        num_microbatches=_num_microbatches.value,
     )

@@ -4,6 +4,7 @@ import grain
 import jax
 import jax.numpy as jnp
 import numpy as np
+import optax
 
 from absl import logging
 from flax import nnx
@@ -85,7 +86,26 @@ def sp_train_loop(
         target_seq: Int[jnp.ndarray, "batch_size context_length"],
     ) -> tuple[Float[jnp.ndarray, ""], Float[jnp.ndarray, ""]]:
         """Trains the model for one step."""
-        loss, grads = nnx.value_and_grad(loss_fn)(local_model, input_seq, target_seq)
+        graphdef, state = nnx.split(local_model)
+
+        def loss_fn_pure(local_state, local_input_seq, local_target_seq):
+            model = nnx.merge(graphdef, local_state)
+            return loss_fn(model, local_input_seq, local_target_seq)
+
+        value_and_grad_fn = jax.value_and_grad(loss_fn_pure)
+        if train_config.num_microbatches > 1:
+            value_and_grad_fn = optax.microbatching.microbatch(
+                value_and_grad_fn,
+                argnums=(1, 2),
+                microbatch_size=train_config.training_batch_size
+                // train_config.num_microbatches,
+                accumulator=(
+                    optax.microbatching.AccumulationType.MEAN,
+                    optax.microbatching.AccumulationType.MEAN,
+                ),
+            )
+        loss, grads = value_and_grad_fn(state, input_seq, target_seq)
+
         local_optimizer.update(local_model, grads)
         return (
             loss,
@@ -170,7 +190,25 @@ def mu_p_train_loop(
         target_seq: Int[jnp.ndarray, "batch_size context_length"],
     ) -> tuple[Float[jnp.ndarray, ""], Float[jnp.ndarray, ""]]:
         """Trains the model for one step."""
-        loss, grads = nnx.value_and_grad(loss_fn)(local_model, input_seq, target_seq)
+        graphdef, state = nnx.split(local_model)
+
+        def loss_fn_pure(local_state, local_input_seq, local_target_seq):
+            model = nnx.merge(graphdef, local_state)
+            return loss_fn(model, local_input_seq, local_target_seq)
+
+        value_and_grad_fn = jax.value_and_grad(loss_fn_pure)
+        if train_config.num_microbatches > 1:
+            value_and_grad_fn = optax.microbatching.microbatch(
+                value_and_grad_fn,
+                argnums=(1, 2),
+                microbatch_size=train_config.training_batch_size
+                // train_config.num_microbatches,
+                accumulator=(
+                    optax.microbatching.AccumulationType.MEAN,
+                    optax.microbatching.AccumulationType.MEAN,
+                ),
+            )
+        loss, grads = value_and_grad_fn(state, input_seq, target_seq)
         local_embedding_optimizer.update(local_model, grads)
         local_block_and_output_optimizer.update(local_model, grads)
         return (

@@ -62,6 +62,12 @@ _validation_every_n_steps = flags.DEFINE_integer(
 _sharding_strategy = flags.DEFINE_enum(
     "sharding_strategy", "none", ["none", "fsdp_tp"], "Sharding strategy."
 )
+_run_xprof_profiler = flags.DEFINE_boolean(
+    "run_xprof_profiler", False, "Run XProf profiler."
+)
+_xprof_output_filepath = flags.DEFINE_string(
+    "xprof_output_filepath", "xprof", "XProf output filepath."
+)
 
 
 def _get_mesh_and_sharding(
@@ -427,6 +433,8 @@ def main(argv: Sequence[str]) -> None:
     )
     # TODO(djwenren): figure out if the training and validation data need to be explicitly moved to
     # devices.
+    if _run_xprof_profiler.value and _xprof_output_filepath.value:
+        jax.profiler.start_trace(_xprof_output_filepath.value)
     if train_config.use_mu_p:
         _run_mu_p_training(
             train_config=train_config,
@@ -451,6 +459,8 @@ def main(argv: Sequence[str]) -> None:
             log_train_metrics_every_n_steps=_log_train_metrics_every_n_steps.value,
             validation_every_n_steps=_validation_every_n_steps.value,
         )
+    if _run_xprof_profiler.value and _xprof_output_filepath.value:
+        jax.profiler.stop_trace()
     ckpt_manager.wait_until_finished()
     ckpt_manager.close()
 

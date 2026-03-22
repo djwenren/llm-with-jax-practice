@@ -21,6 +21,9 @@ _context_length = flags.DEFINE_integer("context_length", 16, "Context length.")
 _num_layers = flags.DEFINE_integer("num_layers", 2, "Number of layers.")
 _num_heads = flags.DEFINE_integer("num_heads", 4, "Number of heads.")
 _rope_theta = flags.DEFINE_float("rope_theta", 10000, "RoPE theta.")
+_attention_type = flags.DEFINE_enum(
+    "attention_type", "custom", ["custom", "xla", "cudnn"], "Attention type."
+)
 _d_model = flags.DEFINE_integer("d_model", 128, "Model dimension.")
 _d_ff_to_d_model = flags.DEFINE_float(
     "d_ff_to_d_model", None, "FF dimension to model dimension ratio."
@@ -63,6 +66,16 @@ def _config_dtype_str() -> Literal["float32", "bfloat16", "float16"]:
             raise ValueError(f"Invalid dtype: {v!r}.")
 
 
+def _config_attention_type_str() -> Literal["custom", "xla", "cudnn"]:
+    """Narrow absl enum flag value to the attention type names used in ``TransformerConfig``."""
+    v = _attention_type.value
+    match v:
+        case "custom" | "xla" | "cudnn":
+            return v
+        case _:
+            raise ValueError(f"Invalid attention type: {v!r}.")
+
+
 def get_dtype(dtype_str: Literal["float32", "bfloat16", "float16"]) -> jnp.dtype:
     """Gets JAX dtype from string."""
     match dtype_str:
@@ -82,6 +95,7 @@ class TransformerConfig:  # pylint: disable=too-many-instance-attributes
     context_length: int
     num_layers: int
     num_heads: int
+    attention_type: Literal["custom", "xla", "cudnn"] = "custom"
 
     rope_theta: float
 
@@ -119,6 +133,7 @@ def get_transformer_config(*, use_mu_p: bool) -> TransformerConfig:
             context_length=_context_length.value,
             num_layers=_num_layers.value,
             num_heads=_num_heads.value,
+            attention_type=_config_attention_type_str(),
             rope_theta=_rope_theta.value,
             d_model=math.ceil(_d_base.value * _m_p.value),
             d_ff_to_d_model=_d_ff_to_d_model.value,
@@ -144,6 +159,7 @@ def get_transformer_config(*, use_mu_p: bool) -> TransformerConfig:
         context_length=_context_length.value,
         num_layers=_num_layers.value,
         num_heads=_num_heads.value,
+        attention_type=_config_attention_type_str(),
         rope_theta=_rope_theta.value,
         d_model=_d_model.value,
         d_ff_to_d_model=_d_ff_to_d_model.value,
@@ -198,6 +214,7 @@ class TransformerLm(nnx.Module):
             theta=config.rope_theta,
             d_k=config.d_model // config.num_heads,
             max_seq_len=config.context_length,
+            dtype=get_dtype(config.dtype),
         )
         # TODO(djwenren): try adding a ratio between attn_std and ffn_std. This is motivated by
         # He/Xavier initialization, where the standard deviation of the weights is
@@ -219,6 +236,7 @@ class TransformerLm(nnx.Module):
                     d_ff=config.d_ff,
                 ),
                 rngs=rngs,
+                attention_type=config.attention_type,
                 dtype=get_dtype(config.dtype),
                 sharding=sharding.transformer_blocks,
                 use_mu_p=True,
@@ -279,6 +297,7 @@ class TransformerLm(nnx.Module):
             theta=config.rope_theta,
             d_k=config.d_model // config.num_heads,
             max_seq_len=config.context_length,
+            dtype=get_dtype(config.dtype),
         )
 
         @nnx.vmap(transform_metadata={nnx.PARTITION_NAME: None}, in_axes=(0,))
@@ -292,6 +311,7 @@ class TransformerLm(nnx.Module):
                     d_ff=config.d_ff,
                 ),
                 rngs=rngs,
+                attention_type=config.attention_type,
                 dtype=get_dtype(config.dtype),
                 sharding=sharding.transformer_blocks,
                 use_mu_p=False,

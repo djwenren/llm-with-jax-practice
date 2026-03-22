@@ -45,7 +45,7 @@ class Linear(nnx.Module):
             * jnp.array(std, dtype=dtype)
         )
         self.out_sharding = sharding.out
-        self.alpha = alpha or 1.0
+        self.alpha = nnx.Variable(jnp.array(alpha or 1.0, dtype=dtype))
 
     def __call__(
         self,
@@ -55,7 +55,7 @@ class Linear(nnx.Module):
             jnp.einsum(
                 "...D, DF -> ... F", x, self.weight, out_sharding=self.out_sharding
             )
-            * self.alpha
+            * self.alpha[...]
         )
         return output
 
@@ -86,13 +86,14 @@ class Embedding(nnx.Module):
             * jnp.array(std, dtype=dtype)
         )
         self.out_sharding = sharding.out
-        self.alpha = alpha or 1.0
+        self.alpha = nnx.Variable(jnp.array(alpha or 1.0, dtype=dtype))
 
     def __call__(
         self, token_ids: Int[Array, "..."]
     ) -> Float[Array, "... embedding_dim"]:
         return (
-            self.weight.at[token_ids].get(out_sharding=self.out_sharding) * self.alpha
+            self.weight.at[token_ids].get(out_sharding=self.out_sharding)
+            * self.alpha[...]
         )
 
 
@@ -280,6 +281,7 @@ class MultiHeadSelfAttention(nnx.Module):
         token_positions: Int[Array, "... seq_len"] | None = None,
         rope: RoPE | None = None,
     ) -> Float[Array, "... seq_len d_model"]:
+        dtype = in_features.dtype
         combined_in_projection = self.combined_in_projection(in_features)
         query, key, value = jnp.split(combined_in_projection, 3, axis=-1)
         if self.attention_type == "custom":
@@ -289,7 +291,7 @@ class MultiHeadSelfAttention(nnx.Module):
                 value=value,
                 token_positions=token_positions,
                 rope=rope,
-            )
+            ).astype(dtype)
         else:
             scaled_dot_product_attention_result = self._call_jax_attention(
                 query=query,
@@ -297,7 +299,7 @@ class MultiHeadSelfAttention(nnx.Module):
                 value=value,
                 token_positions=token_positions,
                 rope=rope,
-            )
+            ).astype(dtype)
         return self.out_projection(scaled_dot_product_attention_result)
 
     def _call_custom_attention(
@@ -396,6 +398,7 @@ class TransformerBlock(nnx.Module):
         d_ff: int,
         rngs: nnx.Rngs,
         *,
+        attention_type: Literal["custom", "xla", "cudnn"] = "custom",
         dtype: jnp.dtype = jnp.float32,
         eps: float = 1e-5,
         sharding: _sharding.TransformerBlockSharding = _sharding.TransformerBlockSharding(),
@@ -412,6 +415,7 @@ class TransformerBlock(nnx.Module):
             d_model=d_model,
             num_heads=num_heads,
             rngs=rngs,
+            attention_type=attention_type,
             dtype=dtype,
             sharding=sharding.attn,
             use_mu_p=use_mu_p,
