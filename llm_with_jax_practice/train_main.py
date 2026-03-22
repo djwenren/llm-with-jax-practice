@@ -8,7 +8,6 @@ from absl import app
 from absl import flags
 
 import jax
-import wandb
 
 from llm_with_jax_practice import sharding as _sharding
 from llm_with_jax_practice import train_config as _train_config
@@ -64,26 +63,6 @@ _xprof_output_filepath = flags.DEFINE_string(
 )
 
 
-def _get_wandb_run(
-    *,
-    train_config: _train_config.TrainConfig,
-    model_config: transformer.TransformerConfig,
-    sharding_strategy: str,
-    wandb_entity: str,
-    wandb_project: str,
-    wandb_run_name: str,
-) -> wandb.Run:
-    """Gets the wandb run."""
-    return wandb.init(
-        entity=wandb_entity,
-        project=wandb_project,
-        name=wandb_run_name,
-        config=dataclasses.asdict(train_config)
-        | dataclasses.asdict(model_config)
-        | {"sharding_strategy": sharding_strategy},
-    )
-
-
 def main(argv: Sequence[str]) -> None:
     """Main function."""
     if len(argv) > 1:
@@ -117,7 +96,7 @@ def main(argv: Sequence[str]) -> None:
         ckpt_manager=ckpt_manager,
         use_model_and_train_config_from_checkpoint=_use_model_and_train_config_from_checkpoint.value,  # pylint: disable=line-too-long
     )
-    wandb_run = _get_wandb_run(
+    wandb_run = train_utils.get_wandb_run(
         train_config=train_config,
         model_config=model_config,
         sharding_strategy=_sharding_strategy.value,

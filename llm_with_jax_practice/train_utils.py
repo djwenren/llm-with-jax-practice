@@ -1,5 +1,7 @@
 """Train utilities."""
 
+import dataclasses
+
 import grain
 import jax
 import jax.numpy as jnp
@@ -71,7 +73,7 @@ def sp_train_loop(
     train_dataset: grain.IterDataset,
     validation_dataset: grain.IterDataset,
     train_config: _train_config.TrainConfig,
-    ckpt_manager: checkpoint.CheckpointManager,
+    ckpt_manager: checkpoint.BaseCheckpointManager | None,
     start_step: int = 0,
     *,
     wandb_run: wandb.Run | None = None,
@@ -79,6 +81,10 @@ def sp_train_loop(
     validation_every_n_steps: int = 10,
 ) -> None:
     """Trains the model with standard parameterization."""
+    if ckpt_manager is not None:
+        assert isinstance(
+            ckpt_manager, checkpoint.CheckpointManager
+        ), "ckpt_manager must be an instance of CheckpointManager"
 
     @nnx.jit(donate_argnames=("local_model", "local_optimizer"))
     def _train_step(
@@ -153,12 +159,13 @@ def sp_train_loop(
                 wandb_run=wandb_run,
                 step=step,
             )
-        ckpt_manager.save(
-            step=step,
-            model=model,
-            metadata={},
-            optimizer=nnx_optimizer,
-        )
+        if ckpt_manager is not None:
+            ckpt_manager.save(
+                step=step,
+                model=model,
+                metadata={},
+                optimizer=nnx_optimizer,
+            )
 
 
 def mu_p_train_loop(
@@ -168,7 +175,7 @@ def mu_p_train_loop(
     train_dataset: grain.IterDataset,
     validation_dataset: grain.IterDataset,
     train_config: _train_config.TrainConfig,
-    ckpt_manager: checkpoint.MuPCheckpointManager,
+    ckpt_manager: checkpoint.BaseCheckpointManager | None,
     start_step: int = 0,
     *,
     wandb_run: wandb.Run | None = None,
@@ -176,6 +183,10 @@ def mu_p_train_loop(
     validation_every_n_steps: int = 10,
 ) -> None:
     """Trains the model with mu-p parameterization."""
+    if ckpt_manager is not None:
+        assert isinstance(
+            ckpt_manager, checkpoint.MuPCheckpointManager
+        ), "ckpt_manager must be an instance of MuPCheckpointManager"
 
     @nnx.jit(
         donate_argnames=(
@@ -261,13 +272,14 @@ def mu_p_train_loop(
                 wandb_run=wandb_run,
                 step=step,
             )
-        ckpt_manager.save(
-            step=step,
-            model=model,
-            metadata={},
-            embedding_optimizer=embedding_optimizer,
-            block_and_output_optimizer=block_and_output_optimizer,
-        )
+        if ckpt_manager is not None:
+            ckpt_manager.save(
+                step=step,
+                model=model,
+                metadata={},
+                embedding_optimizer=embedding_optimizer,
+                block_and_output_optimizer=block_and_output_optimizer,
+            )
 
 
 def run_validation(
@@ -338,12 +350,13 @@ def get_sp_model_and_optimizer(
     train_config: _train_config.TrainConfig,
     model_config: transformer.TransformerConfig,
     sharding: _sharding.TransformerLmSharding,
-    ckpt_manager: checkpoint.BaseCheckpointManager,
+    ckpt_manager: checkpoint.BaseCheckpointManager | None = None,
 ) -> tuple[nnx.Module, nnx.Optimizer]:
     """Gets the model and optimizers."""
-    assert isinstance(
-        ckpt_manager, checkpoint.CheckpointManager
-    ), "ckpt_manager must be an instance of CheckpointManager"
+    if ckpt_manager is not None:
+        assert isinstance(
+            ckpt_manager, checkpoint.CheckpointManager
+        ), "ckpt_manager must be an instance of CheckpointManager"
     assert (
         not train_config.use_mu_p
     ), "use_mu_p must be False to get SP model and optimizer."
@@ -364,7 +377,6 @@ def get_sp_model_and_optimizer(
             )
         ),
     )
-    latest_step = ckpt_manager.latest_step()
 
     @nnx.jit
     def _get_fresh_model_and_optimizer():
@@ -374,7 +386,7 @@ def get_sp_model_and_optimizer(
         optimizer = nnx.Optimizer(model, tx, wrt=nnx.Param)
         return model, optimizer
 
-    if latest_step is None:
+    if ckpt_manager is None or ckpt_manager.latest_step() is None:
         return _get_fresh_model_and_optimizer()
 
     # Restoration involves complex file IO, so we do it outside of JIT.
@@ -383,6 +395,7 @@ def get_sp_model_and_optimizer(
             config=model_config, rngs=nnx.Rngs(jax.random.key(42)), sharding=sharding
         )
     )
+    latest_step = ckpt_manager.latest_step()
     model, _, optimizer = ckpt_manager.restore(
         step=latest_step,
         abstract_model=abstract_model,
@@ -395,7 +408,7 @@ def get_mu_p_model_and_optimizer(
     train_config: _train_config.TrainConfig,
     model_config: transformer.TransformerConfig,
     sharding: _sharding.TransformerLmSharding,
-    ckpt_manager: checkpoint.BaseCheckpointManager,
+    ckpt_manager: checkpoint.BaseCheckpointManager | None = None,
 ) -> tuple[nnx.Module, nnx.Optimizer, nnx.Optimizer]:
     """Gets the mu-p model and optimizers.
 
@@ -407,9 +420,10 @@ def get_mu_p_model_and_optimizer(
     Returns:
         A tuple of (model, embedding_optimizer, block_and_output_optimizer).
     """
-    assert isinstance(
-        ckpt_manager, checkpoint.MuPCheckpointManager
-    ), "ckpt_manager must be an instance of MuPCheckpointManager"
+    if ckpt_manager is not None:
+        assert isinstance(
+            ckpt_manager, checkpoint.MuPCheckpointManager
+        ), "ckpt_manager must be an instance of MuPCheckpointManager"
     assert (
         train_config.use_mu_p
     ), "use_mu_p must be True to get mu-p model and optimizers."
@@ -448,7 +462,6 @@ def get_mu_p_model_and_optimizer(
             )
         ),
     )
-    latest_step = ckpt_manager.latest_step()
     embedding_params_filter = nnx.All(nnx.Param, nnx.PathContains("token_embeddings"))
     block_and_output_params_filter = nnx.All(
         nnx.Param, nnx.Not(nnx.PathContains("token_embeddings"))
@@ -467,8 +480,10 @@ def get_mu_p_model_and_optimizer(
         )
         return model, embedding_optimizer, block_and_output_optimizer
 
-    if latest_step is None:
+    if ckpt_manager is None or ckpt_manager.latest_step() is None:
         return _get_fresh_model_and_optimizers()
+
+    latest_step = ckpt_manager.latest_step()
 
     # Restoration involves complex file IO, so we do it outside of JIT.
     abstract_model = nnx.eval_shape(
@@ -493,7 +508,7 @@ def run_sp_training(
     train_config: _train_config.TrainConfig,
     model_config: transformer.TransformerConfig,
     sharding: _sharding.TransformerLmSharding,
-    ckpt_manager: checkpoint.BaseCheckpointManager,
+    ckpt_manager: checkpoint.BaseCheckpointManager | None,
     training_dataset: grain.IterDataset,
     validation_dataset: grain.IterDataset,
     wandb_run: wandb.Run,
@@ -501,9 +516,10 @@ def run_sp_training(
     validation_every_n_steps: int,
 ) -> None:
     """Runs SP training."""
-    assert isinstance(
-        ckpt_manager, checkpoint.CheckpointManager
-    ), "ckpt_manager must be an instance of CheckpointManager"
+    if ckpt_manager is not None:
+        assert isinstance(
+            ckpt_manager, checkpoint.CheckpointManager
+        ), "ckpt_manager must be an instance of CheckpointManager"
 
     logging.info("Running training with standard parameterization.")
     logging.info("Loading model with model config: %s", model_config)
@@ -524,7 +540,11 @@ def run_sp_training(
         validation_dataset=validation_dataset,
         train_config=train_config,
         ckpt_manager=ckpt_manager,
-        start_step=ckpt_manager.latest_step() or 0,
+        start_step=(
+            ckpt_manager.latest_step()
+            if ckpt_manager is not None and ckpt_manager.latest_step() is not None
+            else 0
+        ),
         wandb_run=wandb_run,
         log_train_metrics_every_n_steps=log_train_metrics_every_n_steps,
         validation_every_n_steps=validation_every_n_steps,
@@ -537,7 +557,7 @@ def run_mu_p_training(
     train_config: _train_config.TrainConfig,
     model_config: transformer.TransformerConfig,
     sharding: _sharding.TransformerLmSharding,
-    ckpt_manager: checkpoint.BaseCheckpointManager,
+    ckpt_manager: checkpoint.BaseCheckpointManager | None,
     training_dataset: grain.IterDataset,
     validation_dataset: grain.IterDataset,
     wandb_run: wandb.Run,
@@ -545,9 +565,10 @@ def run_mu_p_training(
     validation_every_n_steps: int,
 ) -> None:
     """Runs MuP training."""
-    assert isinstance(
-        ckpt_manager, checkpoint.MuPCheckpointManager
-    ), "ckpt_manager must be an instance of MuPCheckpointManager"
+    if ckpt_manager is not None:
+        assert isinstance(
+            ckpt_manager, checkpoint.MuPCheckpointManager
+        ), "ckpt_manager must be an instance of MuPCheckpointManager"
 
     logging.info("Running training with mu-p parameterization.")
     logging.info("Loading model with model config: %s", model_config)
@@ -572,9 +593,33 @@ def run_mu_p_training(
         validation_dataset=validation_dataset,
         train_config=train_config,
         ckpt_manager=ckpt_manager,
-        start_step=ckpt_manager.latest_step() or 0,
+        start_step=(
+            ckpt_manager.latest_step()
+            if ckpt_manager is not None and ckpt_manager.latest_step() is not None
+            else 0
+        ),
         wandb_run=wandb_run,
         log_train_metrics_every_n_steps=log_train_metrics_every_n_steps,
         validation_every_n_steps=validation_every_n_steps,
     )
     logging.info("Training loop completed.")
+
+
+def get_wandb_run(
+    *,
+    train_config: _train_config.TrainConfig,
+    model_config: transformer.TransformerConfig,
+    sharding_strategy: str,
+    wandb_entity: str,
+    wandb_project: str,
+    wandb_run_name: str,
+) -> wandb.Run:
+    """Gets the wandb run."""
+    return wandb.init(
+        entity=wandb_entity,
+        project=wandb_project,
+        name=wandb_run_name,
+        config=dataclasses.asdict(train_config)
+        | dataclasses.asdict(model_config)
+        | {"sharding_strategy": sharding_strategy},
+    )

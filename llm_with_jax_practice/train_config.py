@@ -71,6 +71,10 @@ class TrainConfig(nnx.Pytree):
 
 def get_train_config() -> TrainConfig:
     """Get train configuration."""
+    if _cosine_onecycle_min_learning_rate.value > 0:
+        min_learning_rate = _cosine_onecycle_min_learning_rate.value
+    else:
+        min_learning_rate = _cosine_onecycle_max_learning_rate.value * 0.1
     return TrainConfig(
         num_steps=_num_steps.value,
         training_batch_size=_training_batch_size.value,
@@ -80,7 +84,7 @@ def get_train_config() -> TrainConfig:
         adamw_eps=_adamw_eps.value,
         adamw_weight_decay=_adamw_weight_decay.value,
         cosine_onecycle_max_learning_rate=_cosine_onecycle_max_learning_rate.value,
-        cosine_onecycle_min_learning_rate=_cosine_onecycle_min_learning_rate.value,
+        cosine_onecycle_min_learning_rate=min_learning_rate,
         cosine_onecycle_warmup_iters=_cosine_onecycle_warmup_iters.value,
         cosine_onecycle_cosine_cycle_iters=_cosine_onecycle_cosine_cycle_iters.value,
         max_total_gradient_l2_norm=_max_total_gradient_l2_norm.value,
