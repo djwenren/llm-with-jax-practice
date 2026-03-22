@@ -2,6 +2,10 @@
 
 import dataclasses
 
+from absl import logging
+
+import jax
+
 from jax.sharding import PartitionSpec as P
 
 
@@ -111,3 +115,14 @@ FSDP_TP_SHARDING = TransformerLmSharding(
     ),
     lm_head=LinearSharding(weight=P("model", None), out=P("data", None, None)),
 )
+
+
+def get_mesh_and_sharding(
+    sharding_strategy: str,
+) -> tuple[jax.sharding.Mesh | None, TransformerLmSharding]:
+    """Gets the mesh and sharding."""
+    if sharding_strategy == "fsdp_tp":
+        logging.info("Setting mesh for FSDP + TP sharding.")
+        mesh = jax.make_mesh((4, 2), ("data", "model"))
+        return mesh, FSDP_TP_SHARDING
+    return None, TransformerLmSharding()

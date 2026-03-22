@@ -73,6 +73,7 @@ class BaseCheckpointManager:
         train_config: _train_config.TrainConfig | None = None,
         model_config: transformer.TransformerConfig | None = None,
     ):
+        self._checkpoint_dir = checkpoint_dir
         self._ocp_checkpoint_manager_options = ocp.CheckpointManagerOptions(
             max_to_keep=max_to_keep,
             save_interval_steps=save_interval_steps,
@@ -151,6 +152,11 @@ class BaseCheckpointManager:
         if model_config_dict is None:
             return None
         return transformer.TransformerConfig(**model_config_dict)
+
+    @property
+    def checkpoint_dir(self) -> os.PathLike:
+        """Returns the checkpoint directory."""
+        return self._checkpoint_dir
 
 
 class CheckpointManager(BaseCheckpointManager):
