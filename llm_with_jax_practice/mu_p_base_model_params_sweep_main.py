@@ -122,11 +122,22 @@ def main(argv: Sequence[str]) -> None:
         "metric": {"goal": "minimize", "name": "train/loss"},
         "parameters": {
             "sweep_max_learning_rate": {
-                "values": [2e-3, 1e-3, 5e-4, 1e-4],
+                # https://wandb.ai/fm966hz/llm-with-jax-practice/sweeps/h22rq71j
+                # "values": [2e-3, 1e-3, 5e-4],
+                # https://wandb.ai/fm966hz/llm-with-jax-practice/sweeps/vy0aof8n
+                # "values": [2e-3, 4e-3, 6e-3, 8e-3, 1e-2],
+                # https://wandb.ai/fm966hz/llm-with-jax-practice/sweeps/1ap57na1
+                "values": [8e-3],
             },
-            "sweep_alpha_input": {"values": [0.8, 1.0, 1.2]},
-            "sweep_alpha_output": {"values": [0.8, 1.0, 1.2]},
-            "sweep_std_base": {"values": [0.05, 0.01, 0.005, 0.001]},
+            # "sweep_alpha_input": {"values": [0.8, 1.0, 1.2]},
+            # "sweep_alpha_input": {"values": [1.2, 1.4, 1.6]},
+            "sweep_alpha_input": {"values": [1.6, 2.4, 2.8, 3.2]},
+            # "sweep_alpha_output": {"values": [0.8, 1.0, 1.2]},
+            # "sweep_alpha_output": {"values": [1.2, 1.4, 1.6]},
+            "sweep_alpha_output": {"values": [1.6, 2.4, 2.8, 3.2]},
+            # "sweep_std_base": {"values": [0.05, 0.01, 0.005]},
+            # "sweep_std_base": {"values": [0.05, 0.075, 0.1]},
+            "sweep_std_base": {"values": [0.15, 0.2, 0.25]},
         },
     }
     sweep_id = wandb.sweep(
