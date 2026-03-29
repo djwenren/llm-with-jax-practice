@@ -55,9 +55,11 @@ ALPHA_OUTPUT=3.2
 STD_BASE=0.25
 SHARDING_STRATEGY="none"
 
+XLA_FLAGS="--xla_python_client_mem_fraction=0.4"
+
 TRAIN_CMD="uv run llm_with_jax_practice/train_main.py"
 
-${TRAIN_CMD} \
+XLA_FLAGS=${XLA_FLAGS} ${TRAIN_CMD} \
   --checkpoint_dir="${CHECKPOINT_DIR}" \
   --max_ckpts_to_keep="${MAX_CKPTS_TO_KEEP}" \
   --ckpt_save_interval_steps="${CKPT_SAVE_INTERVAL_STEPS}" \
