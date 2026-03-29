@@ -8,7 +8,7 @@ EXP_NAME="$3"
 
 CHECKPOINT_DIR="${BASE_CHECKPOINT_DIR}/${EXP_NAME}"
 MAX_CKPTS_TO_KEEP=4
-CKPT_SAVE_INTERVAL_STEPS=10
+CKPT_SAVE_INTERVAL_STEPS=10000
 TRAINING_DATA_SOURCE_PATH="${BASE_DATA_DIR}/tiny_stories_train_tokens.npy"
 VALIDATION_DATA_SOURCE_PATH="${BASE_DATA_DIR}/tiny_stories_valid_tokens.npy"
 USE_MODEL_AND_TRAIN_CONFIG_FROM_CHECKPOINT=True
@@ -47,9 +47,9 @@ M_P=1
 ALPHA_INPUT=1.0
 ALPHA_OUTPUT=1.0
 STD_BASE=0.001
-SHARDING_STRATEGY="fsdp_tp"
+SHARDING_STRATEGY="fsdp"
 
-XLA_FLAGS="--xla_force_host_platform_device_count=8"
+XLA_FLAGS="--xla_force_host_platform_device_count=4"
 TRAIN_CMD="uv run llm_with_jax_practice/train_main.py"
 
 XLA_FLAGS="${XLA_FLAGS}" ${TRAIN_CMD} \

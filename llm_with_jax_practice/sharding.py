@@ -76,6 +76,46 @@ class TransformerLmSharding:
     lm_head: LinearSharding = LinearSharding()
 
 
+FSDP_SHARDING = TransformerLmSharding(
+    token_embeddings=EmbeddingSharding(
+        embedding_matrix=P(None, None), out=P("data", None, None)
+    ),
+    transformer_blocks=TransformerBlockSharding(
+        rms_norm_pre_attn=RMSNormSharding(
+            weight=P(
+                None,
+            )
+        ),
+        attn=MultiHeadSelfAttentionSharding(
+            combined_in_projection=LinearSharding(
+                weight=P("data", None), out=P("data", None, None)
+            ),
+            out_projection=LinearSharding(
+                weight=P(None, "data"), out=P("data", None, None)
+            ),
+        ),
+        rms_norm_pre_ff=RMSNormSharding(
+            weight=P(
+                None,
+            )
+        ),
+        ffn=SwiGLUSharding(
+            up_projection=LinearSharding(
+                weight=P("data", None), out=P("data", None, None)
+            ),
+            down_projection=LinearSharding(
+                weight=P(None, "data"), out=P("data", None, None)
+            ),
+        ),
+    ),
+    ln_final=RMSNormSharding(
+        weight=P(
+            None,
+        )
+    ),
+    lm_head=LinearSharding(weight=P(None, None), out=P("data", None, None)),
+)
+
 FSDP_TP_SHARDING = TransformerLmSharding(
     token_embeddings=EmbeddingSharding(
         embedding_matrix=P(None, "model"), out=P("data", None, "model")
@@ -121,6 +161,10 @@ def get_mesh_and_sharding(
     sharding_strategy: str,
 ) -> tuple[jax.sharding.Mesh | None, TransformerLmSharding]:
     """Gets the mesh and sharding."""
+    if sharding_strategy == "fsdp":
+        logging.info("Setting mesh for FSDP sharding.")
+        mesh = jax.make_mesh((4,), ("data",))
+        return mesh, FSDP_SHARDING
     if sharding_strategy == "fsdp_tp":
         logging.info("Setting mesh for FSDP + TP sharding.")
         mesh = jax.make_mesh((4, 2), ("data", "model"))

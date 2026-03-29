@@ -53,7 +53,7 @@ _validation_every_n_steps = flags.DEFINE_integer(
     "validation_every_n_steps", 10, "Validation every n steps."
 )
 _sharding_strategy = flags.DEFINE_enum(
-    "sharding_strategy", "none", ["none", "fsdp_tp"], "Sharding strategy."
+    "sharding_strategy", "none", ["none", "fsdp", "fsdp_tp"], "Sharding strategy."
 )
 _run_xprof_profiler = flags.DEFINE_boolean(
     "run_xprof_profiler", False, "Run XProf profiler."
