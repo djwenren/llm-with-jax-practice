@@ -1,6 +1,5 @@
 """Layers for LLM with JAX Practice."""
 
-from requests import get
 import math
 
 from typing import Literal
@@ -11,8 +10,6 @@ import jax.numpy as jnp
 
 from flax import nnx
 from jax import Array
-from jax import sharding
-from jax.sharding import PartitionSpec as P
 from jaxtyping import Float
 from jaxtyping import Int
 
@@ -50,38 +47,10 @@ class Linear(nnx.Module):
         self.out_sharding = sharding.out
         self.alpha = nnx.Variable(jnp.array(alpha or 1.0, dtype=dtype))
 
-    def _match_sharding(
-        self,
-        x: Float[Array, "... d_in"],
-    ) -> Float[Array, "... d_in"]:
-        x_sharding = getattr(x, "sharding", None)
-        x_spec = getattr(x_sharding, "spec", None)
-        if x_spec is None:
-            return x
-
-        w_sharding = getattr(self.weight, "sharding", None)
-        w_spec = getattr(w_sharding, "spec", None)
-        if w_spec is None:
-            return x
-        w_contracting_sharding = w_spec[0] if len(w_spec) > 0 else None
-        if w_contracting_sharding is None:
-            return x
-
-        new_x_spec = list(x_spec)
-        new_x_spec += [None] * (x.ndim - len(new_x_spec))
-        if w_contracting_sharding == new_x_spec[-1]:
-            return x
-        if w_contracting_sharding in x_spec:
-            new_x_spec[-1] = None
-        else:
-            new_x_spec[-1] = w_contracting_sharding
-        return jax.sharding.reshard(x, P(*new_x_spec))
-
     def __call__(
         self,
         x: Float[Array, "... d_in"],
     ) -> Float[Array, "... d_out"]:
-        x = self._match_sharding(x)
         output = (
             jnp.einsum(
                 "...D, DF -> ... F", x, self.weight, out_sharding=self.out_sharding
@@ -413,10 +382,16 @@ class MultiHeadSelfAttention(nnx.Module):
             implementation=self.attention_type,
             scale=self.attention_normalizer,
         )
-        return einops.rearrange(
+        result = einops.rearrange(
             scaled_dot_product_attention_result,
             "... seq_len num_heads d_head -> ... seq_len (num_heads d_head)",
         )
+        # Opaque attention kernels (e.g. cuDNN) may change the output sharding.
+        # Reshard to match the expected activation sharding before out_projection.
+        activation_sharding = self.combined_in_projection.out_sharding
+        if activation_sharding is not None:
+            result = jax.sharding.reshard(result, activation_sharding)
+        return result
 
 
 class TransformerBlock(nnx.Module):
