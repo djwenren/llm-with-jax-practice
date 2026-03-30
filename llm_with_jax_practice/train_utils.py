@@ -43,6 +43,8 @@ def get_datasets(
         seed=seed,
         use_repeat=True,
         num_repeats=None,
+        num_workers=jax.local_device_count(),
+        prefetch_size=2,
     )
     validation_dataset = data_loader.get_dataset(
         np_data=validation_token_data,
@@ -52,6 +54,8 @@ def get_datasets(
         seed=seed,
         use_repeat=True,
         num_repeats=None,
+        num_workers=jax.local_device_count(),
+        prefetch_size=2,
     )
     return training_dataset, validation_dataset
 
@@ -65,6 +69,18 @@ def loss_fn(
     """Computes the loss for the model."""
     logits = model(input_seq)
     return functions.cross_entropy_loss(logits=logits, target_seq=target_seq)
+
+
+@nnx.jit()
+def run_validation(
+    model: nnx.Module,
+    input_seq: Int[jnp.ndarray, "batch_size context_length"],
+    target_seq: Int[jnp.ndarray, "batch_size context_length"],
+) -> tuple[Float[jnp.ndarray, ""], Float[jnp.ndarray, ""]]:
+    """Runs validation."""
+    loss = loss_fn(model, input_seq, target_seq)
+    perplexity = jnp.exp(loss)
+    return loss, perplexity
 
 
 def sp_train_loop(
@@ -129,16 +145,30 @@ def sp_train_loop(
 
     train_iter = iter(train_dataset)
     validation_iter = iter(validation_dataset)
+
+    # Prefetch the first batch to device.
+    input_seq, target_seq = next(train_iter)
+    input_seq = jax.device_put(input_seq)
+    target_seq = jax.device_put(target_seq)
+
     for step in tqdm(
         range(start_step, train_config.num_steps),
         initial=start_step,
         total=train_config.num_steps,
         desc="Training",
     ):
-        input_seq, target_seq = next(train_iter)
         loss, total_gradient_l2_norm = _train_step(
             model, nnx_optimizer, input_seq, target_seq
         )
+
+        # Prefetch next batch asynchronously.
+        try:
+            input_seq, target_seq = next(train_iter)
+            input_seq = jax.device_put(input_seq)
+            target_seq = jax.device_put(target_seq)
+        except StopIteration:
+            break
+
         if wandb_run and (step - start_step) % log_train_metrics_every_n_steps == 0:
             wandb_run.log(
                 {
@@ -152,12 +182,22 @@ def sp_train_loop(
             and (step - start_step) % validation_every_n_steps == 0
         ):
             validation_input_seq, validation_target_seq = next(validation_iter)
-            run_validation(
+            validation_input_seq = jax.device_put(validation_input_seq)
+            validation_target_seq = jax.device_put(validation_target_seq)
+            val_loss, val_perplexity = run_validation(
                 model=model,
                 input_seq=validation_input_seq,
                 target_seq=validation_target_seq,
-                wandb_run=wandb_run,
+            )
+            wandb_run.log(
+                {
+                    "validation/loss": val_loss,
+                    "validation/perplexity": val_perplexity,
+                },
                 step=step,
+            )
+            logging.info(
+                f"Step {step}: Validation loss: {val_loss}, perplexity: {val_perplexity}"
             )
         if ckpt_manager is not None:
             ckpt_manager.save(
@@ -171,7 +211,8 @@ def sp_train_loop(
 def mu_p_train_loop(
     model: nnx.Module,
     embedding_optimizer: nnx.Optimizer,
-    block_and_output_optimizer: nnx.Optimizer,
+    block_optimizer: nnx.Optimizer,
+    output_optimizer: nnx.Optimizer,
     train_dataset: grain.IterDataset,
     validation_dataset: grain.IterDataset,
     train_config: _train_config.TrainConfig,
@@ -192,13 +233,15 @@ def mu_p_train_loop(
         donate_argnames=(
             "local_model",
             "local_embedding_optimizer",
-            "local_block_and_output_optimizer",
+            "local_block_optimizer",
+            "local_output_optimizer",
         )
     )
     def _train_step(
         local_model: nnx.Module,
         local_embedding_optimizer: nnx.Optimizer,
-        local_block_and_output_optimizer: nnx.Optimizer,
+        local_block_optimizer: nnx.Optimizer,
+        local_output_optimizer: nnx.Optimizer,
         input_seq: Int[jnp.ndarray, "batch_size context_length"],
         target_seq: Int[jnp.ndarray, "batch_size context_length"],
     ) -> tuple[Float[jnp.ndarray, ""], Float[jnp.ndarray, ""]]:
@@ -223,7 +266,8 @@ def mu_p_train_loop(
             )
         loss, grads = value_and_grad_fn(state, input_seq, target_seq)
         local_embedding_optimizer.update(local_model, grads)
-        local_block_and_output_optimizer.update(local_model, grads)
+        local_block_optimizer.update(local_model, grads)
+        local_output_optimizer.update(local_model, grads)
         return (
             loss,
             # Compute the total L2 norm of the gradients.
@@ -238,20 +282,35 @@ def mu_p_train_loop(
 
     train_iter = iter(train_dataset)
     validation_iter = iter(validation_dataset)
+
+    # Prefetch first batch.
+    input_seq, target_seq = next(train_iter)
+    input_seq = jax.device_put(input_seq)
+    target_seq = jax.device_put(target_seq)
+
     for step in tqdm(
         range(start_step, train_config.num_steps),
         initial=start_step,
         total=train_config.num_steps,
         desc="Training",
     ):
-        input_seq, target_seq = next(train_iter)
         loss, total_gradient_l2_norm = _train_step(
             model,
             embedding_optimizer,
-            block_and_output_optimizer,
+            block_optimizer,
+            output_optimizer,
             input_seq,
             target_seq,
         )
+
+        # Prefetch next batch.
+        try:
+            input_seq, target_seq = next(train_iter)
+            input_seq = jax.device_put(input_seq)
+            target_seq = jax.device_put(target_seq)
+        except StopIteration:
+            break
+
         if wandb_run and (step - start_step) % log_train_metrics_every_n_steps == 0:
             wandb_run.log(
                 {
@@ -265,12 +324,22 @@ def mu_p_train_loop(
             and (step - start_step) % validation_every_n_steps == 0
         ):
             validation_input_seq, validation_target_seq = next(validation_iter)
-            run_validation(
+            validation_input_seq = jax.device_put(validation_input_seq)
+            validation_target_seq = jax.device_put(validation_target_seq)
+            val_loss, val_perplexity = run_validation(
                 model=model,
                 input_seq=validation_input_seq,
                 target_seq=validation_target_seq,
-                wandb_run=wandb_run,
+            )
+            wandb_run.log(
+                {
+                    "validation/loss": val_loss,
+                    "validation/perplexity": val_perplexity,
+                },
                 step=step,
+            )
+            logging.info(
+                f"Step {step}: Validation loss: {val_loss}, perplexity: {val_perplexity}"
             )
         if ckpt_manager is not None:
             ckpt_manager.save(
@@ -278,28 +347,9 @@ def mu_p_train_loop(
                 model=model,
                 metadata={},
                 embedding_optimizer=embedding_optimizer,
-                block_and_output_optimizer=block_and_output_optimizer,
+                block_optimizer=block_optimizer,
+                output_optimizer=output_optimizer,
             )
-
-
-def run_validation(
-    model: nnx.Module,
-    input_seq: Int[jnp.ndarray, "batch_size context_length"],
-    target_seq: Int[jnp.ndarray, "batch_size context_length"],
-    wandb_run: wandb.Run,
-    step: int,
-) -> None:
-    """Runs validation."""
-    loss = loss_fn(model, input_seq, target_seq)
-    perplexity = jnp.exp(loss)
-    wandb_run.log(
-        {
-            "validation/loss": loss,
-            "validation/perplexity": perplexity,
-        },
-        step=step,
-    )
-    logging.info(f"Step {step}: Validation loss: {loss}, perplexity: {perplexity}")
 
 
 def get_ckpt_manager(
@@ -381,7 +431,10 @@ def get_sp_model_and_optimizer(
     @nnx.jit
     def _get_fresh_model_and_optimizer():
         model = transformer.TransformerLm(
-            config=model_config, rngs=nnx.Rngs(jax.random.key(42)), sharding=sharding
+            config=model_config,
+            rngs=nnx.Rngs(jax.random.key(42)),
+            sharding=sharding,
+            use_mu_p=False,
         )
         optimizer = nnx.Optimizer(model, tx, wrt=nnx.Param)
         return model, optimizer
@@ -392,7 +445,10 @@ def get_sp_model_and_optimizer(
     # Restoration involves complex file IO, so we do it outside of JIT.
     abstract_model = nnx.eval_shape(
         lambda: transformer.TransformerLm(
-            config=model_config, rngs=nnx.Rngs(jax.random.key(42)), sharding=sharding
+            config=model_config,
+            rngs=nnx.Rngs(jax.random.key(42)),
+            sharding=sharding,
+            use_mu_p=False,
         )
     )
     latest_step = ckpt_manager.latest_step()
@@ -409,7 +465,7 @@ def get_mu_p_model_and_optimizer(
     model_config: transformer.TransformerConfig,
     sharding: _sharding.TransformerLmSharding,
     ckpt_manager: checkpoint.BaseCheckpointManager | None = None,
-) -> tuple[nnx.Module, nnx.Optimizer, nnx.Optimizer]:
+) -> tuple[nnx.Module, nnx.Optimizer, nnx.Optimizer, nnx.Optimizer]:
     """Gets the mu-p model and optimizers.
 
     Args:
@@ -418,7 +474,7 @@ def get_mu_p_model_and_optimizer(
         sharding: The sharding.
         ckpt_manager: The checkpoint manager.
     Returns:
-        A tuple of (model, embedding_optimizer, block_and_output_optimizer).
+        A tuple of (model, embedding_optimizer, block_optimizer, output_optimizer).
     """
     if ckpt_manager is not None:
         assert isinstance(
@@ -428,57 +484,53 @@ def get_mu_p_model_and_optimizer(
         train_config.use_mu_p
     ), "use_mu_p must be True to get mu-p model and optimizers."
 
-    tx_embedding = optax.chain(
+    tx_common = optax.chain(
         optax.clip_by_global_norm(train_config.max_total_gradient_l2_norm),
         _optimizer.scale_by_adamw(
             betas=(train_config.adamw_beta_1, train_config.adamw_beta_2),
             eps=train_config.adamw_eps,
             weight_decay=train_config.adamw_weight_decay,
-        ),
-        _optimizer.scale_by_schedule(
-            _optimizer.cosine_onecycle_schedule(
-                max_learning_rate=train_config.cosine_onecycle_max_learning_rate,
-                min_learning_rate=train_config.cosine_onecycle_min_learning_rate,
-                warmup_iters=train_config.cosine_onecycle_warmup_iters,
-                cosine_cycle_iters=train_config.cosine_onecycle_cosine_cycle_iters,
-            )
         ),
     )
-    tx_block_and_output = optax.chain(
-        optax.clip_by_global_norm(train_config.max_total_gradient_l2_norm),
-        _optimizer.scale_by_adamw(
-            betas=(train_config.adamw_beta_1, train_config.adamw_beta_2),
-            eps=train_config.adamw_eps,
-            weight_decay=train_config.adamw_weight_decay,
-        ),
-        _optimizer.scale_by_schedule(
+
+    def _get_schedule(lr_multiplier=1.0):
+        return _optimizer.scale_by_schedule(
             _optimizer.cosine_onecycle_schedule(
                 max_learning_rate=train_config.cosine_onecycle_max_learning_rate
-                / model_config.m_p,
+                * lr_multiplier,
                 min_learning_rate=train_config.cosine_onecycle_min_learning_rate
-                / model_config.m_p,
+                * lr_multiplier,
                 warmup_iters=train_config.cosine_onecycle_warmup_iters,
                 cosine_cycle_iters=train_config.cosine_onecycle_cosine_cycle_iters,
             )
-        ),
-    )
+        )
+
+    tx_embedding = optax.chain(tx_common, _get_schedule(1.0))
+    tx_block = optax.chain(tx_common, _get_schedule(1.0 / model_config.m_p))
+    tx_output = optax.chain(tx_common, _get_schedule(1.0))
+
     embedding_params_filter = nnx.All(nnx.Param, nnx.PathContains("token_embeddings"))
-    block_and_output_params_filter = nnx.All(
-        nnx.Param, nnx.Not(nnx.PathContains("token_embeddings"))
+    block_params_filter = nnx.All(
+        nnx.Param,
+        nnx.Not(nnx.PathContains("token_embeddings")),
+        nnx.Not(nnx.PathContains("lm_head")),
     )
+    output_params_filter = nnx.All(nnx.Param, nnx.PathContains("lm_head"))
 
     @nnx.jit
     def _get_fresh_model_and_optimizers():
         model = transformer.TransformerLm(
-            config=model_config, rngs=nnx.Rngs(jax.random.key(42)), sharding=sharding
+            config=model_config,
+            rngs=nnx.Rngs(jax.random.key(42)),
+            sharding=sharding,
+            use_mu_p=True,
         )
         embedding_optimizer = nnx.Optimizer(
             model, tx_embedding, wrt=embedding_params_filter
         )
-        block_and_output_optimizer = nnx.Optimizer(
-            model, tx_block_and_output, wrt=block_and_output_params_filter
-        )
-        return model, embedding_optimizer, block_and_output_optimizer
+        block_optimizer = nnx.Optimizer(model, tx_block, wrt=block_params_filter)
+        output_optimizer = nnx.Optimizer(model, tx_output, wrt=output_params_filter)
+        return model, embedding_optimizer, block_optimizer, output_optimizer
 
     if ckpt_manager is None or ckpt_manager.latest_step() is None:
         return _get_fresh_model_and_optimizers()
@@ -488,19 +540,26 @@ def get_mu_p_model_and_optimizer(
     # Restoration involves complex file IO, so we do it outside of JIT.
     abstract_model = nnx.eval_shape(
         lambda: transformer.TransformerLm(
-            config=model_config, rngs=nnx.Rngs(jax.random.key(42)), sharding=sharding
+            config=model_config,
+            rngs=nnx.Rngs(jax.random.key(42)),
+            sharding=sharding,
+            use_mu_p=True,
         )
     )
 
-    model, _, embedding_optimizer, block_and_output_optimizer = ckpt_manager.restore(
-        step=latest_step,
-        abstract_model=abstract_model,
-        embedding_tx=tx_embedding,
-        block_and_output_tx=tx_block_and_output,
-        embedding_params_filter=embedding_params_filter,
-        block_and_output_params_filter=block_and_output_params_filter,
+    model, _, embedding_optimizer, block_optimizer, output_optimizer = (
+        ckpt_manager.restore(
+            step=latest_step,
+            abstract_model=abstract_model,
+            embedding_tx=tx_embedding,
+            block_tx=tx_block,
+            output_tx=tx_output,
+            embedding_params_filter=embedding_params_filter,
+            block_params_filter=block_params_filter,
+            output_params_filter=output_params_filter,
+        )
     )
-    return model, embedding_optimizer, block_and_output_optimizer
+    return model, embedding_optimizer, block_optimizer, output_optimizer
 
 
 def run_sp_training(
@@ -572,7 +631,7 @@ def run_mu_p_training(
 
     logging.info("Running training with mu-p parameterization.")
     logging.info("Loading model with model config: %s", model_config)
-    model, embedding_optimizer, block_and_output_optimizer = (
+    model, embedding_optimizer, block_optimizer, output_optimizer = (
         get_mu_p_model_and_optimizer(
             train_config=train_config,
             model_config=model_config,
@@ -581,14 +640,15 @@ def run_mu_p_training(
         )
     )
     logging.info(
-        "Model, embedding optimizer, and block and output optimizer loaded. Starting training loop "
-        "with train config: %s",
+        "Model, embedding optimizer, block optimizer, and output optimizer loaded. "
+        "Starting training loop with train config: %s",
         train_config,
     )
     mu_p_train_loop(
         model=model,
         embedding_optimizer=embedding_optimizer,
-        block_and_output_optimizer=block_and_output_optimizer,
+        block_optimizer=block_optimizer,
+        output_optimizer=output_optimizer,
         train_dataset=training_dataset,
         validation_dataset=validation_dataset,
         train_config=train_config,

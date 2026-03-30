@@ -34,6 +34,8 @@ def get_dataset(
     seed: int | None = None,
     use_repeat: bool = False,
     num_repeats: int | None = None,
+    num_workers: int = 1,
+    prefetch_size: int = 2,
 ) -> grain.IterDataset[
     tuple[
         Int[jnp.ndarray, "batch_size context_length"],
@@ -47,6 +49,12 @@ def get_dataset(
         dataset = dataset.shuffle(seed)
     if use_repeat:
         dataset = dataset.repeat(num_repeats)
-    # No need to convert to Jax (not recommended). Also no need to pin_memory or send to GPU like
-    # in PyTorch. https://gemini.google.com/app/b3ca6a3cd9b704c7.
-    return dataset.to_iter_dataset().batch(batch_size=batch_size)
+
+    # Use multi-processing and prefetching if requested.
+    # Note: grain.IterDataset.to_iter_dataset() can take a worker_count.
+    return dataset.to_iter_dataset(
+        read_options=grain.ReadOptions(
+            num_threads=num_workers,
+            prefetch_buffer_size=prefetch_size,
+        )
+    ).batch(batch_size=batch_size)

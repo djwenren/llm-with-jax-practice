@@ -154,6 +154,7 @@ def test_checkpoint_manager_with_config():
             num_layers=2,
             num_heads=4,
             d_model=128,
+            d_ff=512,
             d_ff_to_d_model=4,
             rope_theta=10000,
         )
@@ -189,6 +190,7 @@ def test_checkpoint_manager_with_config():
             num_layers=4,
             num_heads=8,
             d_model=256,
+            d_ff=2048,
             d_ff_to_d_model=8,
             rope_theta=10000,
         )
@@ -218,9 +220,10 @@ class MuPTestModel(nnx.Module):
         super().__init__()
         self.layer1 = nnx.Linear(2, 3, rngs=rngs)
         self.layer2 = nnx.Linear(3, 2, rngs=rngs)
+        self.layer3 = nnx.Linear(2, 2, rngs=rngs)
 
     def __call__(self, x):
-        return self.layer2(self.layer1(x))
+        return self.layer3(self.layer2(self.layer1(x)))
 
 
 def test_mup_checkpoint_manager():
@@ -238,30 +241,38 @@ def test_mup_checkpoint_manager():
             ),
             optimizer.scale_by_learning_rate(learning_rate=1e-3),
         )
-        block_and_output_tx = optax.chain(
+        block_tx = optax.chain(
             optimizer.scale_by_adam(
                 betas=(0.9, 0.999),
                 eps=1e-8,
             ),
             optimizer.scale_by_learning_rate(learning_rate=1e-4),
         )
+        output_tx = optax.chain(
+            optimizer.scale_by_adam(
+                betas=(0.9, 0.999),
+                eps=1e-8,
+            ),
+            optimizer.scale_by_learning_rate(learning_rate=1e-3),
+        )
 
         embedding_params_filter = nnx.All(nnx.Param, nnx.PathContains("layer1"))
-        block_and_output_params_filter = nnx.All(nnx.Param, nnx.PathContains("layer2"))
+        block_params_filter = nnx.All(nnx.Param, nnx.PathContains("layer2"))
+        output_params_filter = nnx.All(nnx.Param, nnx.PathContains("layer3"))
 
         embedding_optimizer = nnx.Optimizer(
             model, embedding_tx, wrt=embedding_params_filter
         )
-        block_and_output_optimizer = nnx.Optimizer(
-            model, block_and_output_tx, wrt=block_and_output_params_filter
-        )
+        block_optimizer = nnx.Optimizer(model, block_tx, wrt=block_params_filter)
+        output_optimizer = nnx.Optimizer(model, output_tx, wrt=output_params_filter)
 
         metadata = {"step": 10}
         # Update model and optimizer state
         x = jax.random.normal(jax.random.key(1), (1, 2))
         grads = nnx.grad(_loss_fn)(model, x)
         embedding_optimizer.update(model, grads)
-        block_and_output_optimizer.update(model, grads)
+        block_optimizer.update(model, grads)
+        output_optimizer.update(model, grads)
 
         # Save checkpoint
         manager.save(
@@ -269,7 +280,8 @@ def test_mup_checkpoint_manager():
             model=model,
             metadata=metadata,
             embedding_optimizer=embedding_optimizer,
-            block_and_output_optimizer=block_and_output_optimizer,
+            block_optimizer=block_optimizer,
+            output_optimizer=output_optimizer,
         )
         manager.wait_until_finished()
 
@@ -281,14 +293,17 @@ def test_mup_checkpoint_manager():
             restored_model,
             restored_metadata,
             restored_embedding_optimizer,
-            restored_block_and_output_optimizer,
+            restored_block_optimizer,
+            restored_output_optimizer,
         ) = manager.restore(
             step=10,
             abstract_model=abstract_model,
             embedding_tx=embedding_tx,
-            block_and_output_tx=block_and_output_tx,
+            block_tx=block_tx,
+            output_tx=output_tx,
             embedding_params_filter=embedding_params_filter,
-            block_and_output_params_filter=block_and_output_params_filter,
+            block_params_filter=block_params_filter,
+            output_params_filter=output_params_filter,
         )
 
         # Verify restoration
@@ -300,8 +315,13 @@ def test_mup_checkpoint_manager():
         )
         jax.tree.map(
             _assert_all_close,
-            restored_block_and_output_optimizer.opt_state,
-            block_and_output_optimizer.opt_state,
+            restored_block_optimizer.opt_state,
+            block_optimizer.opt_state,
+        )
+        jax.tree.map(
+            _assert_all_close,
+            restored_output_optimizer.opt_state,
+            output_optimizer.opt_state,
         )
         assert restored_metadata == metadata
 
@@ -309,13 +329,15 @@ def test_mup_checkpoint_manager():
         x = jax.random.normal(jax.random.key(2), (1, 2))
         old_grads = nnx.grad(_loss_fn)(model, x)
         embedding_optimizer.update(model, old_grads)
-        block_and_output_optimizer.update(model, old_grads)
+        block_optimizer.update(model, old_grads)
+        output_optimizer.update(model, old_grads)
 
         jax.tree.map(_assert_not_all_close, model, restored_model)
 
         new_grads = nnx.grad(_loss_fn)(restored_model, x)
         restored_embedding_optimizer.update(restored_model, new_grads)
-        restored_block_and_output_optimizer.update(restored_model, new_grads)
+        restored_block_optimizer.update(restored_model, new_grads)
+        restored_output_optimizer.update(restored_model, new_grads)
 
         jax.tree.map(_assert_all_close, model, restored_model)
         jax.tree.map(
@@ -325,7 +347,12 @@ def test_mup_checkpoint_manager():
         )
         jax.tree.map(
             _assert_all_close,
-            restored_block_and_output_optimizer.opt_state,
-            block_and_output_optimizer.opt_state,
+            restored_block_optimizer.opt_state,
+            block_optimizer.opt_state,
+        )
+        jax.tree.map(
+            _assert_all_close,
+            restored_output_optimizer.opt_state,
+            output_optimizer.opt_state,
         )
         manager.close()

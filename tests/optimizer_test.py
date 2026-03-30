@@ -191,7 +191,7 @@ def test_adam_state_sharding_and_dtype():
         assert isinstance(adam_state, optimizer.AdamState)
 
         # Get the parameters to compare against.
-        _, params = nnx.split(model, nnx.Param)
+        _, params, _ = nnx.split(model, nnx.Param, ...)
 
         # Extract leaves (the raw JAX arrays) from the states.
         # This avoids type mismatch between Param and OptVariable nodes.

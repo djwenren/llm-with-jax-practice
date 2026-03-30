@@ -3,7 +3,7 @@
 import einops
 import jax
 import jax.numpy as jnp
-import numpy as np
+import optax
 
 from jaxtyping import Bool
 from jaxtyping import Float
@@ -12,15 +12,12 @@ from jaxtyping import Int
 
 def silu(x: Float[jnp.ndarray, "..."]) -> Float[jnp.ndarray, "..."]:
     """Sigmoid-weighted linear unit (SiLU) activation function."""
-    return x * jax.nn.sigmoid(x)
+    return jax.nn.silu(x)
 
 
 def softmax(x: Float[jnp.ndarray, "..."], axis: int) -> Float[jnp.ndarray, "..."]:
     """Softmax activation function."""
-    x_diffed = x - x.max(axis=axis, keepdims=True)
-    x_exped = jnp.exp(x_diffed)
-    x_exp_sum = x_exped.sum(axis=axis, keepdims=True)
-    return x_exped / x_exp_sum
+    return jax.nn.softmax(x, axis=axis)
 
 
 def scaled_dot_product_attention(
@@ -38,28 +35,30 @@ def scaled_dot_product_attention(
         v: Value tensor of shape (..., values_len, d_v).
         mask: Mask tensor of shape (..., queries_len, keys_len). If not None, the positions where
             the attention should be kept are set to True.
+        attention_normalizer: The normalizer for the attention logits.
 
     Returns:
         Float[jnp.ndarray, "... queries_len values_len"]: Output tensor.
     """
     dtype = q.dtype
-    attention_normalizer = attention_normalizer or jnp.array(
-        1.0 / np.sqrt(q.shape[-1]), dtype=dtype
-    )
+    if attention_normalizer is None:
+        attention_normalizer = 1.0 / jnp.sqrt(q.shape[-1])
+    
     scaled_dot_product = (
         einops.einsum(
-            q, k, "... queries_len d_k, ... keys_len d_k -> ... queries_len keys_len"
+            q, k, "... q d, ... k d -> ... q k"
         )
         * attention_normalizer
     )
     if mask is not None:
-        scaled_dot_product = jnp.where(
-            mask, scaled_dot_product, jnp.array(-jnp.inf, dtype=dtype)
-        )
+        # Use a large negative value that is safe for the dtype.
+        mask_value = jnp.finfo(dtype).min if dtype != jnp.bfloat16 else -1e30
+        scaled_dot_product = jnp.where(mask, scaled_dot_product, mask_value)
+    
     return einops.einsum(
-        softmax(scaled_dot_product, axis=-1),
+        jax.nn.softmax(scaled_dot_product, axis=-1),
         v,
-        "... queries_len keys_len, ... keys_len d_v -> ... queries_len d_v",
+        "... q k, ... k d -> ... q d",
     )
 
 
@@ -68,10 +67,4 @@ def cross_entropy_loss(
     target_seq: Int[jnp.ndarray, "..."],
 ) -> Float[jnp.ndarray, ""]:
     """Cross-entropy loss."""
-    logits_shifted: Float[jnp.ndarray, "... vocab_size"] = logits - logits.max(
-        axis=-1, keepdims=True
-    )
-    return jnp.mean(
-        -jnp.take_along_axis(logits_shifted, target_seq[..., None], axis=-1).squeeze()
-        + jnp.log(jnp.sum(jnp.exp(logits_shifted), axis=-1))
-    )
+    return jnp.mean(optax.softmax_cross_entropy_with_integer_labels(logits, target_seq))

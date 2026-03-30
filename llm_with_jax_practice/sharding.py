@@ -161,12 +161,35 @@ def get_mesh_and_sharding(
     sharding_strategy: str,
 ) -> tuple[jax.sharding.Mesh | None, TransformerLmSharding]:
     """Gets the mesh and sharding."""
+    num_devices = jax.device_count()
     if sharding_strategy == "fsdp":
-        logging.info("Setting mesh for FSDP sharding.")
-        mesh = jax.make_mesh((4,), ("data",))
-        return mesh, FSDP_SHARDING
+        logging.info("Setting mesh for FSDP sharding with %d devices.", num_devices)
+        mesh = jax.make_mesh((num_devices,), ("data",))
+        # Update FSDP_SHARDING to shard lm_head weights across data dimension.
+        fsdp_sharding = dataclasses.replace(
+            FSDP_SHARDING,
+            lm_head=LinearSharding(weight=P("data", None), out=P("data", None, None)),
+        )
+        return mesh, fsdp_sharding
     if sharding_strategy == "fsdp_tp":
-        logging.info("Setting mesh for FSDP + TP sharding.")
-        mesh = jax.make_mesh((4, 2), ("data", "model"))
+        # Assume 8 devices for FSDP+TP (4 data, 2 model) if not specified,
+        # but try to be flexible if we have more/less.
+        # This is a bit tricky to generalize without more info, but let's try 2-way TP.
+        tp_size = 2
+        if num_devices % tp_size != 0:
+            logging.warning(
+                "Number of devices %d is not divisible by TP size %d. Falling back to no TP.",
+                num_devices,
+                tp_size,
+            )
+            return None, TransformerLmSharding()
+
+        data_size = num_devices // tp_size
+        logging.info(
+            "Setting mesh for FSDP + TP sharding: data_size=%d, tp_size=%d",
+            data_size,
+            tp_size,
+        )
+        mesh = jax.make_mesh((data_size, tp_size), ("data", "model"))
         return mesh, FSDP_TP_SHARDING
     return None, TransformerLmSharding()
