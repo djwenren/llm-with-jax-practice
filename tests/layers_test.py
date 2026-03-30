@@ -749,3 +749,173 @@ class TestLayers:
             )
             numpy_snapshot.assert_match(y, test_name="test_transformer_block")
             assert y.sharding.spec == P("X", None, "Y")
+
+
+try:
+    _cuda_devices = jax.devices("gpu")
+    _has_cuda = len(_cuda_devices) > 0
+except RuntimeError:
+    _has_cuda = False
+
+
+@pytest.mark.cuda
+@pytest.mark.skipif(not _has_cuda, reason="No CUDA device available")
+class TestLayersCuda:
+    """Tests that require a CUDA device (e.g. cuDNN attention kernels)."""
+
+    @pytest.mark.parametrize("attention_type", ["xla", "cudnn"])
+    def test_jax_attention_preserves_tp_sharding(self, attention_type):
+        """Verify that the reshard after jax.nn.dot_product_attention restores
+        the TP sharding on the model dimension so that out_projection's
+        contracting dimensions are consistent.
+
+        Even with a single GPU (mesh of size 1), JAX will raise
+        ``ShardingTypeError`` if the contracting-dimension shardings
+        disagree, so this reproduces the bug that occurs on multi-GPU
+        FSDP+TP setups.
+        """
+        num_devices = jax.device_count("gpu")
+        mesh = jax.make_mesh((num_devices,), ("model",))
+        with jax.set_mesh(mesh):
+            d_model = 256
+            num_heads = 4
+            mhsa = layers.MultiHeadSelfAttention(
+                d_model=d_model,
+                num_heads=num_heads,
+                rngs=nnx.Rngs(jax.random.key(0)),
+                attention_type=attention_type,
+                dtype=jnp.bfloat16,
+                sharding=_sharding.MultiHeadSelfAttentionSharding(
+                    combined_in_projection=_sharding.LinearSharding(
+                        weight=P(None, "model"),
+                        out=P(None, None, "model"),
+                    ),
+                    out_projection=_sharding.LinearSharding(
+                        weight=P("model", None),
+                        out=P(None, None, None),
+                    ),
+                ),
+            )
+
+            @nnx.jit
+            def forward(model, x):
+                return model(x)
+
+            batch, seq_len = 2, 64
+            x = jax.device_put(
+                jnp.ones((batch, seq_len, d_model), dtype=jnp.bfloat16),
+                P(None, None, "model"),
+            )
+            # This must not raise ShardingTypeError on the
+            # out_projection contracting dimension.
+            y = forward(mhsa, x)
+            assert y.shape == (batch, seq_len, d_model)
+
+    @pytest.mark.parametrize("attention_type", ["xla", "cudnn"])
+    def test_jax_attention_with_rope_preserves_tp_sharding(
+        self, attention_type
+    ):
+        """Same as above but with RoPE applied."""
+        num_devices = jax.device_count("gpu")
+        mesh = jax.make_mesh((num_devices,), ("model",))
+        with jax.set_mesh(mesh):
+            d_model = 256
+            num_heads = 4
+            d_head = d_model // num_heads
+            seq_len = 64
+            rope = layers.RoPE(
+                theta=10000.0, d_k=d_head, max_seq_len=seq_len
+            )
+            mhsa = layers.MultiHeadSelfAttention(
+                d_model=d_model,
+                num_heads=num_heads,
+                rngs=nnx.Rngs(jax.random.key(0)),
+                attention_type=attention_type,
+                dtype=jnp.bfloat16,
+                sharding=_sharding.MultiHeadSelfAttentionSharding(
+                    combined_in_projection=_sharding.LinearSharding(
+                        weight=P(None, "model"),
+                        out=P(None, None, "model"),
+                    ),
+                    out_projection=_sharding.LinearSharding(
+                        weight=P("model", None),
+                        out=P(None, None, None),
+                    ),
+                ),
+            )
+
+            @nnx.jit
+            def forward(model, x, token_positions, rope):
+                return model(
+                    x, token_positions=token_positions, rope=rope
+                )
+
+            batch = 2
+            x = jax.device_put(
+                jnp.ones((batch, seq_len, d_model), dtype=jnp.bfloat16),
+                P(None, None, "model"),
+            )
+            token_positions = jnp.arange(seq_len)[None, :]
+            y = forward(mhsa, x, token_positions=token_positions, rope=rope)
+            assert y.shape == (batch, seq_len, d_model)
+
+    @pytest.mark.parametrize("attention_type", ["xla", "cudnn"])
+    def test_dot_product_attention_erases_tp_sharding(
+        self, attention_type
+    ):
+        """Verify that jax.nn.dot_product_attention erases the TP
+        sharding on the head dimension, and that an explicit reshard
+        restores it.
+
+        This documents a property of the library code: opaque attention
+        kernels (cuDNN / XLA) do not propagate the ``"model"`` partition
+        through the head dimension, so callers must reshard the output
+        themselves.
+        """
+        num_devices = jax.device_count("gpu")
+        mesh = jax.make_mesh((num_devices,), ("model",))
+        with jax.set_mesh(mesh):
+            batch, seq_len, num_heads, d_head = 2, 64, 4, 64
+            d_model = num_heads * d_head
+
+            # Q/K/V with "model" on the num_heads dimension —
+            # mirrors the sharding after combined_in_projection + rearrange.
+            q = jax.device_put(
+                jnp.ones(
+                    (batch, seq_len, num_heads, d_head),
+                    dtype=jnp.bfloat16,
+                ),
+                P(None, None, "model", None),
+            )
+            k = jax.device_put(jnp.ones_like(q), P(None, None, "model", None))
+            v = jax.device_put(jnp.ones_like(q), P(None, None, "model", None))
+
+            # Sanity: inputs carry "model" on axis 2.
+            assert q.sharding.spec == P(None, None, "model", None)
+
+            attn_out = jax.nn.dot_product_attention(
+                query=q,
+                key=k,
+                value=v,
+                is_causal=True,
+                implementation=attention_type,
+            )
+            # The opaque kernel erases the "model" sharding.
+            assert attn_out.sharding.spec[2] != "model", (
+                "Expected jax.nn.dot_product_attention to erase 'model' "
+                "sharding on the head dim, but it was preserved. If JAX "
+                "has fixed this, the reshard in "
+                "_call_jax_attention is safely redundant."
+            )
+
+            # Rearrange back to (batch, seq_len, d_model), mirroring
+            # the rearrange in _call_jax_attention.
+            merged = einops.rearrange(
+                attn_out,
+                "b s h d -> b s (h d)",
+            )
+
+            # Reshard restores the expected activation sharding.
+            activation_sharding = P(None, None, "model")
+            resharded = jax.sharding.reshard(merged, activation_sharding)
+            assert resharded.sharding.spec == P(None, None, "model")

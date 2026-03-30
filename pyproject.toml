@@ -49,6 +49,9 @@ python-preference = "managed"
 log_cli = true
 log_cli_level = "WARNING"
 addopts = "-s"
+markers = [
+    "cuda: marks tests that require a CUDA device (deselect with '-m \"not cuda\"')",
+]
 
 [tool.ruff]
 line-length = 80
