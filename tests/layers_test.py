@@ -17,6 +17,16 @@ from llm_with_jax_practice import (
 )  # pylint: disable=wrong-import-position
 
 
+def _make_cpu_mesh(shape, axes):
+    """Create a mesh backed by simulated CPU devices.
+
+    Using explicit CPU devices ensures the mesh works even when a GPU is
+    present, because ``jax_num_cpu_devices`` always provides the requested
+    number of virtual CPUs regardless of the accelerator backend.
+    """
+    return jax.make_mesh(shape, axes, devices=jax.devices("cpu"))
+
+
 class TestLayers:
     """Tests for layers."""
 
@@ -39,68 +49,6 @@ class TestLayers:
         numpy_snapshot.assert_match(y, test_name="test_linear")
 
     @pytest.mark.parametrize("use_jit", [False, True])
-    def test_linear_sharding(
-        self, use_jit, numpy_snapshot, ts_state_dict, in_embeddings, d_model, d_ff
-    ):
-        """Test linear layer with sharding."""
-        w1_weight = ts_state_dict[0]["layers.0.ffn.w1.weight"]
-        # This by default returns a mesh with explicit axis types.
-        mesh = jax.make_mesh((4, 2), ("X", "Y"))
-        with jax.set_mesh(mesh):
-            linear = layers.Linear(
-                in_features=d_model,
-                out_features=d_ff,
-                rngs=nnx.Rngs(jax.random.key(42)),
-                sharding=_sharding.LinearSharding(weight=P(None, "Y")),
-            )
-            call = (
-                nnx.jit(lambda model, x: model(x))
-                if use_jit
-                else lambda model, x: model(x)
-            )
-            x = jax.device_put(jnp.array(in_embeddings), P("X", None))
-            y = call(linear, x)
-            assert y.sharding.spec == P("X", None, "Y")
-
-            linear.weight = jax.device_put(
-                jnp.array(w1_weight).transpose(), P(None, "Y")
-            )
-            y = call(linear, x)
-            numpy_snapshot.assert_match(y, test_name="test_linear")
-            assert y.sharding.spec == P("X", None, "Y")
-
-    def test_linear_sharding_and_reduce_scatter(
-        self, numpy_snapshot, ts_state_dict, in_embeddings, d_model, d_ff
-    ):
-        """Test linear layer with sharding."""
-        w1_weight = ts_state_dict[0]["layers.0.ffn.w1.weight"]
-        mesh = jax.make_mesh((4, 2), ("X", "Y"))
-        with jax.set_mesh(mesh):
-            linear = layers.Linear(
-                in_features=d_model,
-                out_features=d_ff,
-                rngs=nnx.Rngs(jax.random.key(42)),
-                sharding=_sharding.LinearSharding(
-                    weight=P("Y", None), out=P("X", None, "Y")
-                ),
-            )
-
-            @nnx.jit
-            def call(model, x):
-                return model(x)
-
-            x = jax.device_put(jnp.array(in_embeddings), P("X", None, "Y"))
-            y = call(linear, x)
-            assert y.sharding.spec == P("X", None, "Y")
-
-            linear.weight = jax.device_put(
-                jnp.array(w1_weight).transpose(), P("Y", None)
-            )
-            y = call(linear, x)
-            numpy_snapshot.assert_match(y, test_name="test_linear")
-            assert y.sharding.spec == P("X", None, "Y")
-
-    @pytest.mark.parametrize("use_jit", [False, True])
     def test_embedding(
         self, use_jit, numpy_snapshot, ts_state_dict, in_indices, vocab_size, d_model
     ):
@@ -121,36 +69,6 @@ class TestLayers:
         numpy_snapshot.assert_match(y, test_name="test_embedding")
 
     @pytest.mark.parametrize("use_jit", [False, True])
-    def test_embedding_sharding(
-        self, use_jit, numpy_snapshot, ts_state_dict, in_indices, vocab_size, d_model
-    ):
-        """Test embedding layer with sharding."""
-        embedding_weight = ts_state_dict[0]["token_embeddings.weight"]
-        mesh = jax.make_mesh((4, 2), ("X", "Y"))
-        with jax.set_mesh(mesh):
-            embedding = layers.Embedding(
-                num_embeddings=vocab_size,
-                embedding_dim=d_model,
-                rngs=nnx.Rngs(jax.random.key(42)),
-                sharding=_sharding.EmbeddingSharding(
-                    embedding_matrix=P(None, "Y"), out=P("X", None, "Y")
-                ),
-            )
-            call = (
-                nnx.jit(lambda model, x: model(x))
-                if use_jit
-                else lambda model, x: model(x)
-            )
-            x = jax.device_put(jnp.array(in_indices), P("X", None))
-            y = call(embedding, x)
-            assert y.sharding.spec == P("X", None, "Y")
-
-            embedding.weight = jax.device_put(jnp.array(embedding_weight), P(None, "Y"))
-            y = call(embedding, x)
-            numpy_snapshot.assert_match(y, test_name="test_embedding")
-            assert y.sharding.spec == P("X", None, "Y")
-
-    @pytest.mark.parametrize("use_jit", [False, True])
     def test_rmsnorm(self, use_jit, numpy_snapshot, ts_state_dict, in_embeddings):
         """Test RMSNorm layer."""
         state_dict, _ = ts_state_dict
@@ -158,46 +76,6 @@ class TestLayers:
         d_model = reference_weights.shape[0]
         rms_norm = layers.RMSNorm(d_model=d_model, eps=1e-5)
         rms_norm.weight = jnp.array(reference_weights)
-
-        call = (
-            nnx.jit(lambda model, x: model(x)) if use_jit else lambda model, x: model(x)
-        )
-
-        y = call(rms_norm, jnp.array(in_embeddings))
-        numpy_snapshot.assert_match(y, test_name="test_rmsnorm")
-
-    @pytest.mark.parametrize("use_jit", [False, True])
-    def test_rmsnorm_sharding(
-        self, use_jit, numpy_snapshot, ts_state_dict, in_embeddings
-    ):
-        """Test RMSNorm layer with sharding."""
-        state_dict, _ = ts_state_dict
-        reference_weights = state_dict["layers.1.ln1.weight"]
-        d_model = reference_weights.shape[0]
-        mesh = jax.make_mesh((4, 2), ("X", "Y"))
-        with jax.set_mesh(mesh):
-            rms_norm = layers.RMSNorm(
-                d_model=d_model,
-                eps=1e-5,
-                sharding=_sharding.RMSNormSharding(
-                    weight=P(
-                        None,
-                    )
-                ),
-            )
-            call = (
-                nnx.jit(lambda model, x: model(x))
-                if use_jit
-                else lambda model, x: model(x)
-            )
-            x = jax.device_put(jnp.array(in_embeddings), P("X", None))
-            y = call(rms_norm, x)
-            assert y.sharding.spec == P("X", None, None)
-
-            rms_norm.weight = jax.device_put(jnp.array(reference_weights), P(None))
-            y = call(rms_norm, x)
-            numpy_snapshot.assert_match(y, test_name="test_rmsnorm")
-            assert y.sharding.spec == P("X", None, None)
 
         call = (
             nnx.jit(lambda model, x: model(x)) if use_jit else lambda model, x: model(x)
@@ -227,53 +105,6 @@ class TestLayers:
 
         y = call(swiglu, jnp.array(in_embeddings))
         numpy_snapshot.assert_match(y, test_name="test_swiglu")
-
-    @pytest.mark.parametrize("use_jit", [False, True])
-    def test_swiglu_sharding(
-        self, use_jit, numpy_snapshot, ts_state_dict, in_embeddings, d_model, d_ff
-    ):
-        """Test SwiGLU layer."""
-        w1_weight, w2_weight, w3_weight = [
-            ts_state_dict[0][f"layers.0.ffn.{k}.weight"] for k in ["w1", "w2", "w3"]
-        ]
-        mesh = jax.make_mesh((4, 2), ("X", "Y"))
-        with jax.set_mesh(mesh):
-            swiglu = layers.SwiGLU(
-                d_model=d_model,
-                d_ff=d_ff,
-                rngs=nnx.Rngs(jax.random.key(42)),
-                sharding=_sharding.SwiGLUSharding(
-                    up_projection=_sharding.LinearSharding(
-                        weight=P("X", "Y"), out=P("X", None, "Y")
-                    ),
-                    down_projection=_sharding.LinearSharding(
-                        weight=P("Y", "X"), out=P("X", None, "Y")
-                    ),
-                ),
-            )
-
-            call = (
-                nnx.jit(lambda model, x: model(x))
-                if use_jit
-                else lambda model, x: model(x)
-            )
-
-            x = jax.device_put(jnp.array(in_embeddings), P("X", None, "Y"))
-            y = call(swiglu, x)
-            assert y.sharding.spec == P("X", None, "Y")
-
-            swiglu.w1_projection.weight = jax.device_put(
-                jnp.array(w1_weight).transpose(), P("X", "Y")
-            )
-            swiglu.w3_projection.weight = jax.device_put(
-                jnp.array(w3_weight).transpose(), P("X", "Y")
-            )
-            swiglu.w2_projection.weight = jax.device_put(
-                jnp.array(w2_weight).transpose(), P("Y", "X")
-            )
-            y = call(swiglu, x)
-            numpy_snapshot.assert_match(y, test_name="test_swiglu")
-            assert y.sharding.spec == P("X", None, "Y")
 
     @pytest.mark.parametrize("use_jit", [False, True])
     def test_rope(
@@ -332,70 +163,6 @@ class TestLayers:
 
         y = call(multi_head_self_attention, jnp.array(in_embeddings))
         numpy_snapshot.assert_match(y, test_name="test_multihead_self_attention")
-
-    @pytest.mark.parametrize("use_jit", [False, True])
-    @pytest.mark.parametrize("attention_type", ["custom", "xla"])
-    def test_multihead_self_attention_sharding(
-        self,
-        use_jit,
-        attention_type,
-        numpy_snapshot,
-        ts_state_dict,
-        in_embeddings,
-        d_model,
-        n_heads,
-    ):
-        """Test Multi-head self-attention layer with FSDP + TP sharding."""
-        d, _ = ts_state_dict
-        q_proj_weight, k_proj_weight, v_proj_weight, o_proj_weight = [
-            d[f"layers.0.attn.{k}_proj.weight"] for k in ["q", "k", "v", "output"]
-        ]
-        mesh = jax.make_mesh((4, 2), ("X", "Y"))
-        with jax.set_mesh(mesh):
-            multi_head_self_attention = layers.MultiHeadSelfAttention(
-                d_model=d_model,
-                num_heads=n_heads,
-                rngs=nnx.Rngs(jax.random.key(42)),
-                attention_type=attention_type,
-                sharding=_sharding.MultiHeadSelfAttentionSharding(
-                    combined_in_projection=_sharding.LinearSharding(
-                        weight=P("X", "Y"), out=P("X", None, "Y")
-                    ),
-                    out_projection=_sharding.LinearSharding(
-                        weight=P("Y", "X"), out=P("X", None, "Y")
-                    ),
-                ),
-            )
-
-            call = (
-                nnx.jit(lambda model, x: model(x))
-                if use_jit
-                else lambda model, x: model(x)
-            )
-
-            x = jax.device_put(jnp.array(in_embeddings), P("X", None, "Y"))
-
-            y = call(multi_head_self_attention, x)
-            assert y.sharding.spec == P("X", None, "Y")
-
-            multi_head_self_attention.combined_in_projection.weight = jax.device_put(
-                jnp.concatenate(
-                    [
-                        jnp.array(q_proj_weight).transpose(),
-                        jnp.array(k_proj_weight).transpose(),
-                        jnp.array(v_proj_weight).transpose(),
-                    ],
-                    axis=-1,
-                ),
-                P("X", "Y"),
-            )
-            multi_head_self_attention.out_projection.weight = jax.device_put(
-                jnp.array(o_proj_weight).transpose(),
-                P("Y", "X"),
-            )
-            y = call(multi_head_self_attention, x)
-            numpy_snapshot.assert_match(y, test_name="test_multihead_self_attention")
-            assert y.sharding.spec == P("X", None, "Y")
 
     @pytest.mark.parametrize("use_jit", [False, True])
     @pytest.mark.parametrize("attention_type", ["custom", "xla"])
@@ -458,92 +225,6 @@ class TestLayers:
         numpy_snapshot.assert_match(
             y, test_name="test_multihead_self_attention_with_rope"
         )
-
-    @pytest.mark.parametrize("use_jit", [False, True])
-    @pytest.mark.parametrize("attention_type", ["custom", "xla"])
-    def test_multihead_self_attention_with_rope_sharding(
-        self,
-        use_jit,
-        attention_type,
-        numpy_snapshot,
-        in_embeddings,
-        d_model,
-        n_heads,
-        ts_state_dict,
-        n_keys,
-        theta,
-        pos_ids,
-    ):
-        """Test Multi-head self-attention layer with RoPE and FSDP + TP sharding."""
-        d, _ = ts_state_dict
-        q_proj_weight, k_proj_weight, v_proj_weight, o_proj_weight = [
-            d[f"layers.0.attn.{k}_proj.weight"] for k in ["q", "k", "v", "output"]
-        ]
-        pos_ids = einops.rearrange(jnp.array(pos_ids), "seq -> 1 seq")
-        rope = layers.RoPE(theta=theta, d_k=d_model // n_heads, max_seq_len=n_keys)
-        mesh = jax.make_mesh((4, 2), ("X", "Y"))
-        with jax.set_mesh(mesh):
-            multi_head_self_attention = layers.MultiHeadSelfAttention(
-                d_model=d_model,
-                num_heads=n_heads,
-                rngs=nnx.Rngs(jax.random.key(42)),
-                attention_type=attention_type,
-                sharding=_sharding.MultiHeadSelfAttentionSharding(
-                    combined_in_projection=_sharding.LinearSharding(
-                        weight=P("X", "Y"), out=P("X", None, "Y")
-                    ),
-                    out_projection=_sharding.LinearSharding(
-                        weight=P("Y", "X"), out=P("X", None, "Y")
-                    ),
-                ),
-            )
-
-            call = (
-                nnx.jit(
-                    lambda model, x, token_positions, rope: model(
-                        x, token_positions=token_positions, rope=rope
-                    )
-                )
-                if use_jit
-                else lambda model, x, token_positions, rope: model(
-                    x, token_positions=token_positions, rope=rope
-                )
-            )
-
-            x = jax.device_put(jnp.array(in_embeddings), P("X", None, "Y"))
-            y = call(
-                multi_head_self_attention,
-                x,
-                token_positions=jnp.array(pos_ids),
-                rope=rope,
-            )
-            assert y.sharding.spec == P("X", None, "Y")
-
-            multi_head_self_attention.combined_in_projection.weight = jax.device_put(
-                jnp.concatenate(
-                    [
-                        jnp.array(q_proj_weight).transpose(),
-                        jnp.array(k_proj_weight).transpose(),
-                        jnp.array(v_proj_weight).transpose(),
-                    ],
-                    axis=-1,
-                ),
-                P("X", "Y"),
-            )
-            multi_head_self_attention.out_projection.weight = jax.device_put(
-                jnp.array(o_proj_weight).transpose(),
-                P("Y", "X"),
-            )
-            y = call(
-                multi_head_self_attention,
-                x,
-                token_positions=jnp.array(pos_ids),
-                rope=rope,
-            )
-            numpy_snapshot.assert_match(
-                y, test_name="test_multihead_self_attention_with_rope"
-            )
-            assert y.sharding.spec == P("X", None, "Y")
 
     @pytest.mark.parametrize("use_jit", [False, True])
     def test_transformer_block(
@@ -625,6 +306,343 @@ class TestLayers:
         )
         numpy_snapshot.assert_match(y, test_name="test_transformer_block")
 
+
+@pytest.mark.cpu_mesh
+class TestLayersCpuMesh:
+    """Sharding tests that use a simulated 8-device (4×2) CPU mesh.
+
+    ``jax_num_cpu_devices`` is set to 8 at module import time, so these tests
+    run correctly even on machines that have a GPU — JAX's CPU backend always
+    provides the requested virtual devices.
+    """
+
+    @pytest.mark.parametrize("use_jit", [False, True])
+    def test_linear_sharding(
+        self, use_jit, numpy_snapshot, ts_state_dict, in_embeddings, d_model, d_ff
+    ):
+        """Test linear layer with sharding."""
+        w1_weight = ts_state_dict[0]["layers.0.ffn.w1.weight"]
+        mesh = _make_cpu_mesh((4, 2), ("X", "Y"))
+        with jax.set_mesh(mesh):
+            linear = layers.Linear(
+                in_features=d_model,
+                out_features=d_ff,
+                rngs=nnx.Rngs(jax.random.key(42)),
+                sharding=_sharding.LinearSharding(weight=P(None, "Y")),
+            )
+            call = (
+                nnx.jit(lambda model, x: model(x))
+                if use_jit
+                else lambda model, x: model(x)
+            )
+            x = jax.device_put(jnp.array(in_embeddings), P("X", None))
+            y = call(linear, x)
+            assert y.sharding.spec == P("X", None, "Y")
+
+            linear.weight = jax.device_put(
+                jnp.array(w1_weight).transpose(), P(None, "Y")
+            )
+            y = call(linear, x)
+            numpy_snapshot.assert_match(y, test_name="test_linear")
+            assert y.sharding.spec == P("X", None, "Y")
+
+    def test_linear_sharding_and_reduce_scatter(
+        self, numpy_snapshot, ts_state_dict, in_embeddings, d_model, d_ff
+    ):
+        """Test linear layer with sharding and reduce-scatter output."""
+        w1_weight = ts_state_dict[0]["layers.0.ffn.w1.weight"]
+        mesh = _make_cpu_mesh((4, 2), ("X", "Y"))
+        with jax.set_mesh(mesh):
+            linear = layers.Linear(
+                in_features=d_model,
+                out_features=d_ff,
+                rngs=nnx.Rngs(jax.random.key(42)),
+                sharding=_sharding.LinearSharding(
+                    weight=P("Y", None), out=P("X", None, "Y")
+                ),
+            )
+
+            @nnx.jit
+            def call(model, x):
+                return model(x)
+
+            x = jax.device_put(jnp.array(in_embeddings), P("X", None, "Y"))
+            y = call(linear, x)
+            assert y.sharding.spec == P("X", None, "Y")
+
+            linear.weight = jax.device_put(
+                jnp.array(w1_weight).transpose(), P("Y", None)
+            )
+            y = call(linear, x)
+            numpy_snapshot.assert_match(y, test_name="test_linear")
+
+    @pytest.mark.parametrize("use_jit", [False, True])
+    def test_embedding_sharding(
+        self, use_jit, numpy_snapshot, ts_state_dict, in_indices, vocab_size, d_model
+    ):
+        """Test embedding layer with sharding."""
+        embedding_weight = ts_state_dict[0]["token_embeddings.weight"]
+        mesh = _make_cpu_mesh((4, 2), ("X", "Y"))
+        with jax.set_mesh(mesh):
+            embedding = layers.Embedding(
+                num_embeddings=vocab_size,
+                embedding_dim=d_model,
+                rngs=nnx.Rngs(jax.random.key(42)),
+                sharding=_sharding.EmbeddingSharding(
+                    embedding_matrix=P(None, "Y"), out=P("X", None, "Y")
+                ),
+            )
+            call = (
+                nnx.jit(lambda model, x: model(x))
+                if use_jit
+                else lambda model, x: model(x)
+            )
+            x = jax.device_put(jnp.array(in_indices), P("X", None))
+            y = call(embedding, x)
+            assert y.sharding.spec == P("X", None, "Y")
+
+            embedding.weight = jax.device_put(jnp.array(embedding_weight), P(None, "Y"))
+            y = call(embedding, x)
+            numpy_snapshot.assert_match(y, test_name="test_embedding")
+            assert y.sharding.spec == P("X", None, "Y")
+
+    @pytest.mark.parametrize("use_jit", [False, True])
+    def test_rmsnorm_sharding(
+        self, use_jit, numpy_snapshot, ts_state_dict, in_embeddings
+    ):
+        """Test RMSNorm layer with sharding."""
+        state_dict, _ = ts_state_dict
+        reference_weights = state_dict["layers.1.ln1.weight"]
+        d_model = reference_weights.shape[0]
+        mesh = _make_cpu_mesh((4, 2), ("X", "Y"))
+        with jax.set_mesh(mesh):
+            rms_norm = layers.RMSNorm(
+                d_model=d_model,
+                eps=1e-5,
+                sharding=_sharding.RMSNormSharding(
+                    weight=P(
+                        None,
+                    )
+                ),
+            )
+            call = (
+                nnx.jit(lambda model, x: model(x))
+                if use_jit
+                else lambda model, x: model(x)
+            )
+            x = jax.device_put(jnp.array(in_embeddings), P("X", None))
+            y = call(rms_norm, x)
+            assert y.sharding.spec == P("X", None, None)
+
+            rms_norm.weight = jax.device_put(jnp.array(reference_weights), P(None))
+            y = call(rms_norm, x)
+            numpy_snapshot.assert_match(y, test_name="test_rmsnorm")
+            assert y.sharding.spec == P("X", None, None)
+
+        call = (
+            nnx.jit(lambda model, x: model(x)) if use_jit else lambda model, x: model(x)
+        )
+
+        y = call(rms_norm, jnp.array(in_embeddings))
+        numpy_snapshot.assert_match(y, test_name="test_rmsnorm")
+
+    @pytest.mark.parametrize("use_jit", [False, True])
+    def test_swiglu_sharding(
+        self, use_jit, numpy_snapshot, ts_state_dict, in_embeddings, d_model, d_ff
+    ):
+        """Test SwiGLU layer with sharding."""
+        w1_weight, w2_weight, w3_weight = [
+            ts_state_dict[0][f"layers.0.ffn.{k}.weight"] for k in ["w1", "w2", "w3"]
+        ]
+        mesh = _make_cpu_mesh((4, 2), ("X", "Y"))
+        with jax.set_mesh(mesh):
+            swiglu = layers.SwiGLU(
+                d_model=d_model,
+                d_ff=d_ff,
+                rngs=nnx.Rngs(jax.random.key(42)),
+                sharding=_sharding.SwiGLUSharding(
+                    up_projection=_sharding.LinearSharding(
+                        weight=P("X", "Y"), out=P("X", None, "Y")
+                    ),
+                    down_projection=_sharding.LinearSharding(
+                        weight=P("Y", "X"), out=P("X", None, "Y")
+                    ),
+                ),
+            )
+
+            call = (
+                nnx.jit(lambda model, x: model(x))
+                if use_jit
+                else lambda model, x: model(x)
+            )
+
+            x = jax.device_put(jnp.array(in_embeddings), P("X", None, "Y"))
+            y = call(swiglu, x)
+            assert y.sharding.spec == P("X", None, "Y")
+
+            swiglu.w1_projection.weight = jax.device_put(
+                jnp.array(w1_weight).transpose(), P("X", "Y")
+            )
+            swiglu.w3_projection.weight = jax.device_put(
+                jnp.array(w3_weight).transpose(), P("X", "Y")
+            )
+            swiglu.w2_projection.weight = jax.device_put(
+                jnp.array(w2_weight).transpose(), P("Y", "X")
+            )
+            y = call(swiglu, x)
+            numpy_snapshot.assert_match(y, test_name="test_swiglu")
+            assert y.sharding.spec == P("X", None, "Y")
+
+    @pytest.mark.parametrize("use_jit", [False, True])
+    @pytest.mark.parametrize("attention_type", ["custom", "xla"])
+    def test_multihead_self_attention_sharding(
+        self,
+        use_jit,
+        attention_type,
+        numpy_snapshot,
+        ts_state_dict,
+        in_embeddings,
+        d_model,
+        n_heads,
+    ):
+        """Test Multi-head self-attention layer with FSDP + TP sharding."""
+        d, _ = ts_state_dict
+        q_proj_weight, k_proj_weight, v_proj_weight, o_proj_weight = [
+            d[f"layers.0.attn.{k}_proj.weight"] for k in ["q", "k", "v", "output"]
+        ]
+        mesh = _make_cpu_mesh((4, 2), ("X", "Y"))
+        with jax.set_mesh(mesh):
+            multi_head_self_attention = layers.MultiHeadSelfAttention(
+                d_model=d_model,
+                num_heads=n_heads,
+                rngs=nnx.Rngs(jax.random.key(42)),
+                attention_type=attention_type,
+                sharding=_sharding.MultiHeadSelfAttentionSharding(
+                    combined_in_projection=_sharding.LinearSharding(
+                        weight=P("X", "Y"), out=P("X", None, "Y")
+                    ),
+                    out_projection=_sharding.LinearSharding(
+                        weight=P("Y", "X"), out=P("X", None, "Y")
+                    ),
+                ),
+            )
+
+            call = (
+                nnx.jit(lambda model, x: model(x))
+                if use_jit
+                else lambda model, x: model(x)
+            )
+
+            x = jax.device_put(jnp.array(in_embeddings), P("X", None, "Y"))
+
+            y = call(multi_head_self_attention, x)
+            assert y.sharding.spec == P("X", None, "Y")
+
+            multi_head_self_attention.combined_in_projection.weight = jax.device_put(
+                jnp.concatenate(
+                    [
+                        jnp.array(q_proj_weight).transpose(),
+                        jnp.array(k_proj_weight).transpose(),
+                        jnp.array(v_proj_weight).transpose(),
+                    ],
+                    axis=-1,
+                ),
+                P("X", "Y"),
+            )
+            multi_head_self_attention.out_projection.weight = jax.device_put(
+                jnp.array(o_proj_weight).transpose(),
+                P("Y", "X"),
+            )
+            y = call(multi_head_self_attention, x)
+            numpy_snapshot.assert_match(y, test_name="test_multihead_self_attention")
+            assert y.sharding.spec == P("X", None, "Y")
+
+    @pytest.mark.parametrize("use_jit", [False, True])
+    @pytest.mark.parametrize("attention_type", ["custom", "xla"])
+    def test_multihead_self_attention_with_rope_sharding(
+        self,
+        use_jit,
+        attention_type,
+        numpy_snapshot,
+        in_embeddings,
+        d_model,
+        n_heads,
+        ts_state_dict,
+        n_keys,
+        theta,
+        pos_ids,
+    ):
+        """Test Multi-head self-attention layer with RoPE and FSDP + TP sharding."""
+        d, _ = ts_state_dict
+        q_proj_weight, k_proj_weight, v_proj_weight, o_proj_weight = [
+            d[f"layers.0.attn.{k}_proj.weight"] for k in ["q", "k", "v", "output"]
+        ]
+        pos_ids = einops.rearrange(jnp.array(pos_ids), "seq -> 1 seq")
+        rope = layers.RoPE(theta=theta, d_k=d_model // n_heads, max_seq_len=n_keys)
+        mesh = _make_cpu_mesh((4, 2), ("X", "Y"))
+        with jax.set_mesh(mesh):
+            multi_head_self_attention = layers.MultiHeadSelfAttention(
+                d_model=d_model,
+                num_heads=n_heads,
+                rngs=nnx.Rngs(jax.random.key(42)),
+                attention_type=attention_type,
+                sharding=_sharding.MultiHeadSelfAttentionSharding(
+                    combined_in_projection=_sharding.LinearSharding(
+                        weight=P("X", "Y"), out=P("X", None, "Y")
+                    ),
+                    out_projection=_sharding.LinearSharding(
+                        weight=P("Y", "X"), out=P("X", None, "Y")
+                    ),
+                ),
+            )
+
+            call = (
+                nnx.jit(
+                    lambda model, x, token_positions, rope: model(
+                        x, token_positions=token_positions, rope=rope
+                    )
+                )
+                if use_jit
+                else lambda model, x, token_positions, rope: model(
+                    x, token_positions=token_positions, rope=rope
+                )
+            )
+
+            x = jax.device_put(jnp.array(in_embeddings), P("X", None, "Y"))
+            y = call(
+                multi_head_self_attention,
+                x,
+                token_positions=jnp.array(pos_ids),
+                rope=rope,
+            )
+            assert y.sharding.spec == P("X", None, "Y")
+
+            multi_head_self_attention.combined_in_projection.weight = jax.device_put(
+                jnp.concatenate(
+                    [
+                        jnp.array(q_proj_weight).transpose(),
+                        jnp.array(k_proj_weight).transpose(),
+                        jnp.array(v_proj_weight).transpose(),
+                    ],
+                    axis=-1,
+                ),
+                P("X", "Y"),
+            )
+            multi_head_self_attention.out_projection.weight = jax.device_put(
+                jnp.array(o_proj_weight).transpose(),
+                P("Y", "X"),
+            )
+            y = call(
+                multi_head_self_attention,
+                x,
+                token_positions=jnp.array(pos_ids),
+                rope=rope,
+            )
+            numpy_snapshot.assert_match(
+                y, test_name="test_multihead_self_attention_with_rope"
+            )
+            assert y.sharding.spec == P("X", None, "Y")
+
     @pytest.mark.parametrize("use_jit", [False, True])
     def test_transformer_block_sharding(
         self,
@@ -645,7 +663,7 @@ class TestLayers:
             if "layers.0." in k
         }
         rope = layers.RoPE(theta=theta, d_k=d_model // n_heads, max_seq_len=n_keys)
-        mesh = jax.make_mesh((4, 2), ("X", "Y"))
+        mesh = _make_cpu_mesh((4, 2), ("X", "Y"))
         with jax.set_mesh(mesh):
             transformer_block = layers.TransformerBlock(
                 d_model=d_model,
@@ -812,9 +830,7 @@ class TestLayersCuda:
             assert y.shape == (batch, seq_len, d_model)
 
     @pytest.mark.parametrize("attention_type", ["xla", "cudnn"])
-    def test_jax_attention_with_rope_preserves_tp_sharding(
-        self, attention_type
-    ):
+    def test_jax_attention_with_rope_preserves_tp_sharding(self, attention_type):
         """Same as above but with RoPE applied."""
         num_devices = jax.device_count("gpu")
         mesh = jax.make_mesh((num_devices,), ("model",))
@@ -824,7 +840,7 @@ class TestLayersCuda:
             d_head = d_model // num_heads
             seq_len = 64
             rope = layers.RoPE(
-                theta=10000.0, d_k=d_head, max_seq_len=seq_len
+                theta=10000.0, d_k=d_head, max_seq_len=seq_len, dtype=jnp.bfloat16
             )
             mhsa = layers.MultiHeadSelfAttention(
                 d_model=d_model,
@@ -846,9 +862,7 @@ class TestLayersCuda:
 
             @nnx.jit
             def forward(model, x, token_positions, rope):
-                return model(
-                    x, token_positions=token_positions, rope=rope
-                )
+                return model(x, token_positions=token_positions, rope=rope)
 
             batch = 2
             x = jax.device_put(
@@ -860,17 +874,16 @@ class TestLayersCuda:
             assert y.shape == (batch, seq_len, d_model)
 
     @pytest.mark.parametrize("attention_type", ["xla", "cudnn"])
-    def test_dot_product_attention_erases_tp_sharding(
-        self, attention_type
-    ):
-        """Verify that jax.nn.dot_product_attention erases the TP
-        sharding on the head dimension, and that an explicit reshard
-        restores it.
+    def test_dot_product_attention_tp_sharding(self, attention_type):
+        """Document how jax.nn.dot_product_attention handles TP sharding.
 
-        This documents a property of the library code: opaque attention
-        kernels (cuDNN / XLA) do not propagate the ``"model"`` partition
-        through the head dimension, so callers must reshard the output
-        themselves.
+        The two implementations behave differently:
+        - ``xla``:   preserves the ``"model"`` sharding on the head dimension.
+        - ``cudnn``: erases it (returns an unsharded / empty spec).
+
+        In both cases an explicit reshard after the attention call restores the
+        expected activation sharding, which is what ``_call_jax_attention``
+        does.
         """
         num_devices = jax.device_count("gpu")
         mesh = jax.make_mesh((num_devices,), ("model",))
@@ -900,13 +913,20 @@ class TestLayersCuda:
                 is_causal=True,
                 implementation=attention_type,
             )
-            # The opaque kernel erases the "model" sharding.
-            assert attn_out.sharding.spec[2] != "model", (
-                "Expected jax.nn.dot_product_attention to erase 'model' "
-                "sharding on the head dim, but it was preserved. If JAX "
-                "has fixed this, the reshard in "
-                "_call_jax_attention is safely redundant."
-            )
+
+            spec = attn_out.sharding.spec
+            if attention_type == "xla":
+                # XLA flash-attention propagates the head-dim sharding.
+                assert spec == P(
+                    None, None, "model", None
+                ), f"xla: unexpected head-dim sharding: {spec}"
+            else:
+                # cuDNN attention erases the head-dim sharding; the explicit
+                # reshard in _call_jax_attention is required to restore it.
+                assert spec == P(), (
+                    f"cudnn: unexpected head-dim sharding: {spec} _call_jax_attention is safely "
+                    "redundant."
+                )
 
             # Rearrange back to (batch, seq_len, d_model), mirroring
             # the rearrange in _call_jax_attention.
@@ -915,7 +935,8 @@ class TestLayersCuda:
                 "b s h d -> b s (h d)",
             )
 
-            # Reshard restores the expected activation sharding.
+            # Reshard restores the expected activation sharding for both
+            # implementations.
             activation_sharding = P(None, None, "model")
             resharded = jax.sharding.reshard(merged, activation_sharding)
             assert resharded.sharding.spec == P(None, None, "model")

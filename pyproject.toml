@@ -51,6 +51,7 @@ log_cli_level = "WARNING"
 addopts = "-s"
 markers = [
     "cuda: marks tests that require a CUDA device (deselect with '-m \"not cuda\"')",
+    "cpu_mesh: marks tests that use a simulated 8-device CPU mesh (always runnable, even with a GPU present)",
 ]
 
 [tool.ruff]
