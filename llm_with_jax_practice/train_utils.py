@@ -211,8 +211,7 @@ def sp_train_loop(
 def mu_p_train_loop(
     model: nnx.Module,
     embedding_optimizer: nnx.Optimizer,
-    block_optimizer: nnx.Optimizer,
-    output_optimizer: nnx.Optimizer,
+    block_and_output_optimizer: nnx.Optimizer,
     train_dataset: grain.IterDataset,
     validation_dataset: grain.IterDataset,
     train_config: _train_config.TrainConfig,
@@ -233,15 +232,13 @@ def mu_p_train_loop(
         donate_argnames=(
             "local_model",
             "local_embedding_optimizer",
-            "local_block_optimizer",
-            "local_output_optimizer",
+            "local_block_and_output_optimizer",
         )
     )
     def _train_step(
         local_model: nnx.Module,
         local_embedding_optimizer: nnx.Optimizer,
-        local_block_optimizer: nnx.Optimizer,
-        local_output_optimizer: nnx.Optimizer,
+        local_block_and_output_optimizer: nnx.Optimizer,
         input_seq: Int[jnp.ndarray, "batch_size context_length"],
         target_seq: Int[jnp.ndarray, "batch_size context_length"],
     ) -> tuple[Float[jnp.ndarray, ""], Float[jnp.ndarray, ""]]:
@@ -266,8 +263,7 @@ def mu_p_train_loop(
             )
         loss, grads = value_and_grad_fn(state, input_seq, target_seq)
         local_embedding_optimizer.update(local_model, grads)
-        local_block_optimizer.update(local_model, grads)
-        local_output_optimizer.update(local_model, grads)
+        local_block_and_output_optimizer.update(local_model, grads)
         return (
             loss,
             # Compute the total L2 norm of the gradients.
@@ -297,8 +293,7 @@ def mu_p_train_loop(
         loss, total_gradient_l2_norm = _train_step(
             model,
             embedding_optimizer,
-            block_optimizer,
-            output_optimizer,
+            block_and_output_optimizer,
             input_seq,
             target_seq,
         )
@@ -347,8 +342,7 @@ def mu_p_train_loop(
                 model=model,
                 metadata={},
                 embedding_optimizer=embedding_optimizer,
-                block_optimizer=block_optimizer,
-                output_optimizer=output_optimizer,
+                block_and_output_optimizer=block_and_output_optimizer,
             )
 
 
@@ -465,7 +459,7 @@ def get_mu_p_model_and_optimizer(
     model_config: transformer.TransformerConfig,
     sharding: _sharding.TransformerLmSharding,
     ckpt_manager: checkpoint.BaseCheckpointManager | None = None,
-) -> tuple[nnx.Module, nnx.Optimizer, nnx.Optimizer, nnx.Optimizer]:
+) -> tuple[nnx.Module, nnx.Optimizer, nnx.Optimizer]:
     """Gets the mu-p model and optimizers.
 
     Args:
@@ -474,7 +468,7 @@ def get_mu_p_model_and_optimizer(
         sharding: The sharding.
         ckpt_manager: The checkpoint manager.
     Returns:
-        A tuple of (model, embedding_optimizer, block_optimizer, output_optimizer).
+        A tuple of (model, embedding_optimizer, block_and_output_optimizer).
     """
     if ckpt_manager is not None:
         assert isinstance(
@@ -506,16 +500,15 @@ def get_mu_p_model_and_optimizer(
         )
 
     tx_embedding = optax.chain(tx_common, _get_schedule(1.0))
-    tx_block = optax.chain(tx_common, _get_schedule(1.0 / model_config.m_p))
-    tx_output = optax.chain(tx_common, _get_schedule(1.0))
+    tx_block_and_output = optax.chain(
+        tx_common, _get_schedule(1.0 / model_config.m_p)
+    )
 
     embedding_params_filter = nnx.All(nnx.Param, nnx.PathContains("token_embeddings"))
-    block_params_filter = nnx.All(
+    block_and_output_params_filter = nnx.All(
         nnx.Param,
         nnx.Not(nnx.PathContains("token_embeddings")),
-        nnx.Not(nnx.PathContains("lm_head")),
     )
-    output_params_filter = nnx.All(nnx.Param, nnx.PathContains("lm_head"))
 
     @nnx.jit
     def _get_fresh_model_and_optimizers():
@@ -528,9 +521,10 @@ def get_mu_p_model_and_optimizer(
         embedding_optimizer = nnx.Optimizer(
             model, tx_embedding, wrt=embedding_params_filter
         )
-        block_optimizer = nnx.Optimizer(model, tx_block, wrt=block_params_filter)
-        output_optimizer = nnx.Optimizer(model, tx_output, wrt=output_params_filter)
-        return model, embedding_optimizer, block_optimizer, output_optimizer
+        block_and_output_optimizer = nnx.Optimizer(
+            model, tx_block_and_output, wrt=block_and_output_params_filter
+        )
+        return model, embedding_optimizer, block_and_output_optimizer
 
     if ckpt_manager is None or ckpt_manager.latest_step() is None:
         return _get_fresh_model_and_optimizers()
@@ -547,19 +541,17 @@ def get_mu_p_model_and_optimizer(
         )
     )
 
-    model, _, embedding_optimizer, block_optimizer, output_optimizer = (
+    model, _, embedding_optimizer, block_and_output_optimizer = (
         ckpt_manager.restore(
             step=latest_step,
             abstract_model=abstract_model,
             embedding_tx=tx_embedding,
-            block_tx=tx_block,
-            output_tx=tx_output,
+            block_and_output_tx=tx_block_and_output,
             embedding_params_filter=embedding_params_filter,
-            block_params_filter=block_params_filter,
-            output_params_filter=output_params_filter,
+            block_and_output_params_filter=block_and_output_params_filter,
         )
     )
-    return model, embedding_optimizer, block_optimizer, output_optimizer
+    return model, embedding_optimizer, block_and_output_optimizer
 
 
 def run_sp_training(
@@ -631,7 +623,7 @@ def run_mu_p_training(
 
     logging.info("Running training with mu-p parameterization.")
     logging.info("Loading model with model config: %s", model_config)
-    model, embedding_optimizer, block_optimizer, output_optimizer = (
+    model, embedding_optimizer, block_and_output_optimizer = (
         get_mu_p_model_and_optimizer(
             train_config=train_config,
             model_config=model_config,
@@ -640,15 +632,14 @@ def run_mu_p_training(
         )
     )
     logging.info(
-        "Model, embedding optimizer, block optimizer, and output optimizer loaded. "
+        "Model, embedding optimizer, and block+output optimizer loaded. "
         "Starting training loop with train config: %s",
         train_config,
     )
     mu_p_train_loop(
         model=model,
         embedding_optimizer=embedding_optimizer,
-        block_optimizer=block_optimizer,
-        output_optimizer=output_optimizer,
+        block_and_output_optimizer=block_and_output_optimizer,
         train_dataset=training_dataset,
         validation_dataset=validation_dataset,
         train_config=train_config,

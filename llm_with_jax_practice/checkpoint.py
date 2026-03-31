@@ -284,8 +284,7 @@ class MuPCheckpointManager(BaseCheckpointManager):
         return (
             "model_state",
             "embedding_optimizer_state",
-            "block_optimizer_state",
-            "output_optimizer_state",
+            "block_and_output_optimizer_state",
             "metadata",
         )
 
@@ -303,29 +302,24 @@ class MuPCheckpointManager(BaseCheckpointManager):
             model: The model to save.
             metadata: The metadata to save.
             embedding_optimizer: The embedding optimizer to save.
-            block_optimizer: The block optimizer to save.
-            output_optimizer: The output optimizer to save.
+            block_and_output_optimizer: The block+output optimizer to save.
         """
         assert "embedding_optimizer" in kwargs, "embedding_optimizer must be provided"
         embedding_optimizer = kwargs["embedding_optimizer"]
         assert isinstance(
             embedding_optimizer, nnx.Optimizer
         ), "embedding_optimizer must be an instance of nnx.Optimizer"
-        assert "block_optimizer" in kwargs, "block_optimizer must be provided"
-        block_optimizer = kwargs["block_optimizer"]
+        assert (
+            "block_and_output_optimizer" in kwargs
+        ), "block_and_output_optimizer must be provided"
+        block_and_output_optimizer = kwargs["block_and_output_optimizer"]
         assert isinstance(
-            block_optimizer, nnx.Optimizer
-        ), "block_optimizer must be an instance of nnx.Optimizer"
-        assert "output_optimizer" in kwargs, "output_optimizer must be provided"
-        output_optimizer = kwargs["output_optimizer"]
-        assert isinstance(
-            output_optimizer, nnx.Optimizer
-        ), "output_optimizer must be an instance of nnx.Optimizer"
+            block_and_output_optimizer, nnx.Optimizer
+        ), "block_and_output_optimizer must be an instance of nnx.Optimizer"
 
         _, model_state = nnx.split(model)
         _, embedding_optimizer_state = nnx.split(embedding_optimizer)
-        _, block_optimizer_state = nnx.split(block_optimizer)
-        _, output_optimizer_state = nnx.split(output_optimizer)
+        _, block_and_output_optimizer_state = nnx.split(block_and_output_optimizer)
         self._ocp_checkpoint_manager.save(
             step=step,
             args=ocp.args.Composite(
@@ -333,8 +327,9 @@ class MuPCheckpointManager(BaseCheckpointManager):
                 embedding_optimizer_state=ocp.args.StandardSave(
                     embedding_optimizer_state
                 ),
-                block_optimizer_state=ocp.args.StandardSave(block_optimizer_state),
-                output_optimizer_state=ocp.args.StandardSave(output_optimizer_state),
+                block_and_output_optimizer_state=ocp.args.StandardSave(
+                    block_and_output_optimizer_state
+                ),
                 metadata=ocp.args.JsonSave(metadata),
             ),
         )
@@ -351,57 +346,49 @@ class MuPCheckpointManager(BaseCheckpointManager):
             step: The step to restore from.
             abstract_model: The abstract model to restore into.
             embedding_tx: The embedding gradient transformation.
-            block_tx: The block gradient transformation.
-            output_tx: The output gradient transformation.
+            block_and_output_tx: The block+output gradient transformation.
             embedding_params_filter: The embedding parameters filter.
-            block_params_filter: The block parameters filter.
-            output_params_filter: The output parameters filter.
+            block_and_output_params_filter: The block+output parameters filter.
         Returns:
-            A tuple of (model, metadata, embedding_optimizer, block_optimizer, output_optimizer).
+            A tuple of (model, metadata, embedding_optimizer,
+            block_and_output_optimizer).
         """
         assert "embedding_tx" in kwargs, "embedding_tx must be provided"
         embedding_tx = kwargs["embedding_tx"]
         assert isinstance(
             embedding_tx, optax.GradientTransformation
         ), "embedding_tx must be an instance of optax.GradientTransformation"
-        assert "block_tx" in kwargs, "block_tx must be provided"
-        block_tx = kwargs["block_tx"]
+        assert (
+            "block_and_output_tx" in kwargs
+        ), "block_and_output_tx must be provided"
+        block_and_output_tx = kwargs["block_and_output_tx"]
         assert isinstance(
-            block_tx, optax.GradientTransformation
-        ), "block_tx must be an instance of optax.GradientTransformation"
-        assert "output_tx" in kwargs, "output_tx must be provided"
-        output_tx = kwargs["output_tx"]
-        assert isinstance(
-            output_tx, optax.GradientTransformation
-        ), "output_tx must be an instance of optax.GradientTransformation"
+            block_and_output_tx, optax.GradientTransformation
+        ), "block_and_output_tx must be an instance of optax.GradientTransformation"
 
         assert (
             "embedding_params_filter" in kwargs
         ), "embedding_params_filter must be provided"
         embedding_params_filter = kwargs["embedding_params_filter"]
-        assert "block_params_filter" in kwargs, "block_params_filter must be provided"
-        block_params_filter = kwargs["block_params_filter"]
-        assert "output_params_filter" in kwargs, "output_params_filter must be provided"
-        output_params_filter = kwargs["output_params_filter"]
+        assert (
+            "block_and_output_params_filter" in kwargs
+        ), "block_and_output_params_filter must be provided"
+        block_and_output_params_filter = kwargs["block_and_output_params_filter"]
 
         # 1. Create abstract optimizers on top of abstract model.
         abstract_embedding_optimizer = nnx.Optimizer(
             abstract_model, embedding_tx, wrt=embedding_params_filter
         )
-        abstract_block_optimizer = nnx.Optimizer(
-            abstract_model, block_tx, wrt=block_params_filter
-        )
-        abstract_output_optimizer = nnx.Optimizer(
-            abstract_model, output_tx, wrt=output_params_filter
+        abstract_block_and_output_optimizer = nnx.Optimizer(
+            abstract_model, block_and_output_tx, wrt=block_and_output_params_filter
         )
 
-        # 2. Split both together to get a unified GraphDef and combined abstract state.
-        # Path 0: embedding optimizer state, Path 1: block optimizer state, Path 2: output optimizer state, Path 3: model state.
+        # 2. Split together to get a unified GraphDef and combined abstract state.
+        # Path 0: embedding optimizer, Path 1: block+output optimizer, Path 2: model.
         opt_model_graph_def, abstract_combined_state = nnx.split(
             (
                 abstract_embedding_optimizer,
-                abstract_block_optimizer,
-                abstract_output_optimizer,
+                abstract_block_and_output_optimizer,
                 abstract_model,
             )
         )
@@ -411,15 +398,12 @@ class MuPCheckpointManager(BaseCheckpointManager):
         restored_args = self._ocp_checkpoint_manager.restore(
             step=step,
             args=ocp.args.Composite(
-                model_state=ocp.args.StandardRestore(abstract_combined_state[3]),
+                model_state=ocp.args.StandardRestore(abstract_combined_state[2]),
                 embedding_optimizer_state=ocp.args.StandardRestore(
                     abstract_combined_state[0]
                 ),
-                block_optimizer_state=ocp.args.StandardRestore(
+                block_and_output_optimizer_state=ocp.args.StandardRestore(
                     abstract_combined_state[1]
-                ),
-                output_optimizer_state=ocp.args.StandardRestore(
-                    abstract_combined_state[2]
                 ),
                 metadata=ocp.args.JsonRestore(),
             ),
@@ -429,15 +413,13 @@ class MuPCheckpointManager(BaseCheckpointManager):
         full_restored_state = nnx.State(
             {
                 0: restored_args.embedding_optimizer_state,
-                1: restored_args.block_optimizer_state,
-                2: restored_args.output_optimizer_state,
-                3: restored_args.model_state,
+                1: restored_args.block_and_output_optimizer_state,
+                2: restored_args.model_state,
             }
         )
         (
             restored_embedding_optimizer,
-            restored_block_optimizer,
-            restored_output_optimizer,
+            restored_block_and_output_optimizer,
             restored_model,
         ) = nnx.merge(opt_model_graph_def, full_restored_state)
 
@@ -445,6 +427,5 @@ class MuPCheckpointManager(BaseCheckpointManager):
             restored_model,
             restored_args.metadata,
             restored_embedding_optimizer,
-            restored_block_optimizer,
-            restored_output_optimizer,
+            restored_block_and_output_optimizer,
         )
