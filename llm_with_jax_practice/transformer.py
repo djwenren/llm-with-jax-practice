@@ -1,5 +1,6 @@
 """Transformer for LLM with JAX Practice."""
 
+from functools import partial
 from typing import Literal
 
 import dataclasses
@@ -341,6 +342,10 @@ class TransformerLm(nnx.Module):
         activation = self.token_embeddings(input_tokens)
         token_positions = jnp.arange(input_tokens.shape[-1])
 
+        @partial(
+            jax.checkpoint,
+            policy=jax.checkpoint_policies.dots_with_no_batch_dims_saveable,
+        )
         def scan_over_transformer_blocks(activation, transformer_block):
             return (
                 transformer_block(
